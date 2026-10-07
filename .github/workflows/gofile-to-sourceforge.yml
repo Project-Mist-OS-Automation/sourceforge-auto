@@ -512,7 +512,7 @@ jobs:
       # gzip-compressed JSON.
       # ============================================================
 
-      - name: Get Gofile content
+            - name: Get Gofile content
         id: gofile_content
         shell: bash
         run: |
@@ -526,18 +526,11 @@ jobs:
 
           SUCCESS=0
 
-          CURRENT_WINDOW="$(
-            date +%s
-          )"
-
+          CURRENT_WINDOW="$(date +%s)"
           CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
 
-          /*
-           * Try current and previous time window.
-           *
-           * This protects against a window rollover while the
-           * workflow is running.
-           */
+          # Try current and previous time windows.
+          # This protects against a WT window rollover.
 
           for OFFSET in 0 1 2; do
 
@@ -586,23 +579,26 @@ jobs:
             if [[ "$HTTP_CODE" == "200" ]]; then
 
               STATUS="$(
-                jq -r '.status // empty' "$RESPONSE" 2>/dev/null ||
-                true
+                jq -r '.status // empty' "$RESPONSE" 2>/dev/null || true
               )"
 
               echo "API status: $STATUS"
 
               if [[ "$STATUS" == "ok" ]]; then
                 SUCCESS=1
+
                 echo
                 echo "GOFILE CONTENT FOUND"
                 echo
+
                 jq . "$RESPONSE"
+
                 break
               fi
 
               echo
               echo "Gofile returned HTTP 200 but API status was not ok."
+
               jq . "$RESPONSE" 2>/dev/null ||
                 cat "$RESPONSE"
 
@@ -629,6 +625,7 @@ jobs:
           done
 
           if [[ "$SUCCESS" != "1" ]]; then
+
             echo
             echo "============================================================"
             echo "GOFILE CONTENT REQUEST FAILED"
@@ -636,6 +633,7 @@ jobs:
 
             echo
             echo "Raw response:"
+
             cat "$RESPONSE" 2>/dev/null || true
 
             exit 1
