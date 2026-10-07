@@ -90,11 +90,9 @@ jobs:
           echo "=============================================="
           echo "WORKSPACE"
           echo "=============================================="
+
           echo "WORK_DIR:"
           echo "$WORK_DIR"
-
-          echo
-          echo "Testing workspace write access..."
 
           TEST_FILE="$WORK_DIR/test"
 
@@ -153,6 +151,7 @@ jobs:
           echo "=============================================="
           echo "INPUT VALIDATION"
           echo "=============================================="
+
           echo "Gofile URL : $GOFILE_URL"
           echo "Device     : $DEVICE"
 
@@ -188,11 +187,12 @@ jobs:
           echo "=============================================="
           echo "GOFILE ID"
           echo "=============================================="
+
           echo "ID: $GOFILE_ID"
 
 
       # ============================================================
-      # DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT
+      # DOWNLOAD GOFILE WT SCRIPT
       # ============================================================
 
       - name: Download Gofile Website Token script
@@ -223,8 +223,11 @@ jobs:
             --output "$WT_SCRIPT" \
             "https://gofile.io/js/wt.obf.js"
           then
+
             echo "Primary WT script downloaded."
+
           else
+
             echo "Primary WT script failed."
             echo "Trying fallback location..."
 
@@ -239,6 +242,7 @@ jobs:
               --max-time 120 \
               --output "$WT_SCRIPT" \
               "https://gofile.io/dist/js/wt.obf.js"
+
           fi
 
           if [[ ! -f "$WT_SCRIPT" ]]; then
@@ -259,8 +263,6 @@ jobs:
           if [[ "$WT_SIZE" -lt 1000 ]]; then
             echo
             echo "ERROR: WT script is suspiciously small."
-            echo
-            echo "Response:"
             head -c 2000 "$WT_SCRIPT" || true
             exit 1
           fi
@@ -365,7 +367,6 @@ jobs:
 
           context._sha256 = (input) => {
             rawHashInput = String(input);
-
             return "0".repeat(64);
           };
 
@@ -429,7 +430,7 @@ jobs:
 
 
       # ============================================================
-      # EXTRACT DYNAMIC GOFILE WT SECRET
+      # EXTRACT GOFILE WT SECRET
       # ============================================================
 
       - name: Extract Gofile Website Token secret
@@ -456,7 +457,9 @@ jobs:
             exit 1
           fi
 
-          GOFILE_WT_SECRET="$(tr -d '\r\n' < "$WT_SECRET_FILE")"
+          GOFILE_WT_SECRET="$(
+            tr -d '\r\n' < "$WT_SECRET_FILE"
+          )"
 
           if [[ -z "$GOFILE_WT_SECRET" ]]; then
             echo "ERROR: WT secret is empty."
@@ -523,7 +526,6 @@ jobs:
           if [[ "$HTTP_STATUS" != "200" ]]; then
             echo
             echo "ERROR: Gofile guest account creation failed."
-            echo
             cat "$RESPONSE" || true
             exit 1
           fi
@@ -546,7 +548,7 @@ jobs:
 
 
       # ============================================================
-      # GET GOFILE CONTENT METADATA
+      # GET GOFILE CONTENT
       # ============================================================
 
       - name: Get Gofile content metadata
@@ -622,12 +624,8 @@ jobs:
           if [[ "$SUCCESS" != "1" ]]; then
             echo
             echo "ERROR: Gofile content request failed."
-            echo
 
-            if [[ -f "$RESPONSE" ]]; then
-              head -c 5000 "$RESPONSE" || true
-              echo
-            fi
+            head -c 5000 "$RESPONSE" || true
 
             exit 1
           fi
@@ -637,7 +635,7 @@ jobs:
 
 
       # ============================================================
-      # EXTRACT ACTUAL FILE INFORMATION
+      # EXTRACT FILE INFORMATION
       # ============================================================
 
       - name: Extract Gofile file information
@@ -771,18 +769,13 @@ jobs:
 
 
       # ============================================================
-      # CREATE GOFILE COOKIE
+      # PREPARE GOFILE COOKIE
       # ============================================================
 
       - name: Prepare Gofile authentication cookie
         shell: bash
         run: |
           set -euo pipefail
-
-          echo
-          echo "=============================================="
-          echo "PREPARE GOFILE COOKIE"
-          echo "=============================================="
 
           COOKIE_JAR="$WORK_DIR/gofile.cookies"
 
@@ -797,7 +790,7 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD ACTUAL FILE
+      # DOWNLOAD ROM
       # ============================================================
 
       - name: Download file from Gofile
@@ -815,9 +808,6 @@ jobs:
 
           echo "Filename:"
           echo "$FILE_NAME"
-
-          echo
-          echo "Starting download..."
 
           rm -f "$OUTPUT"
 
@@ -856,13 +846,14 @@ jobs:
           if [[ "$FILE_SIZE" -lt 10240 ]]; then
             echo
             echo "ERROR: Downloaded file is suspiciously small."
-            echo
-            echo "File information:"
+
             file "$OUTPUT" || true
+
             echo
-            echo "First bytes:"
+            echo "Response:"
             head -c 1000 "$OUTPUT" |
               cat -v || true
+
             exit 1
           fi
 
@@ -874,11 +865,13 @@ jobs:
 
           case "$FILE_TYPE" in
             *HTML*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
+
               echo
-              echo "ERROR: Gofile returned text/HTML instead of the ROM."
-              echo
+              echo "ERROR: Gofile returned HTML/text instead of the ROM."
+
               head -c 1000 "$OUTPUT" |
                 cat -v || true
+
               exit 1
               ;;
           esac
@@ -897,7 +890,7 @@ jobs:
 
 
       # ============================================================
-      # VERIFY DOWNLOADED FILE
+      # VERIFY ROM
       # ============================================================
 
       - name: Verify downloaded ROM
@@ -911,11 +904,6 @@ jobs:
           echo "=============================================="
           echo "VERIFY DOWNLOADED ROM"
           echo "=============================================="
-
-          if [[ ! -f "$FILE" ]]; then
-            echo "ERROR: ROM file is missing."
-            exit 1
-          fi
 
           ls -lh "$FILE"
 
@@ -940,7 +928,7 @@ jobs:
         shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_SSH_KEY: ${{ secrets.SOURCEFORGE_SSH_KEY }}
+          SOURCEFORGE_SSH_KEY_B64: ${{ secrets.SOURCEFORGE_SSH_KEY }}
         run: |
           set -euo pipefail
 
@@ -954,7 +942,7 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "${SOURCEFORGE_SSH_KEY:-}" ]]; then
+          if [[ -z "${SOURCEFORGE_SSH_KEY_B64:-}" ]]; then
             echo "ERROR: SOURCEFORGE_SSH_KEY secret is missing."
             exit 1
           fi
@@ -963,22 +951,53 @@ jobs:
 
           chmod 700 "$HOME/.ssh"
 
-          printf '%s\n' "$SOURCEFORGE_SSH_KEY" \
-            > "$HOME/.ssh/sourceforge_mistos"
+          echo "Decoding SourceForge private key..."
+
+          printf '%s' "$SOURCEFORGE_SSH_KEY_B64" |
+            base64 --decode > "$HOME/.ssh/sourceforge_mistos"
 
           chmod 600 "$HOME/.ssh/sourceforge_mistos"
 
-          echo
-          echo "Validating private key..."
+          echo "Checking private key..."
 
-          ssh-keygen \
+          if ! ssh-keygen \
             -y \
             -f "$HOME/.ssh/sourceforge_mistos" \
             > "$HOME/.ssh/sourceforge_mistos.pub"
+          then
+
+            echo
+            echo "ERROR: Decoded SourceForge private key is invalid."
+            exit 1
+
+          fi
 
           chmod 644 "$HOME/.ssh/sourceforge_mistos.pub"
 
-          echo "Private SSH key is valid."
+          KEY_FINGERPRINT="$(
+            ssh-keygen \
+              -lf "$HOME/.ssh/sourceforge_mistos.pub" |
+              awk '{print $2}'
+          )"
+
+          echo
+          echo "Private key is valid."
+          echo "Key fingerprint:"
+          echo "$KEY_FINGERPRINT"
+
+          EXPECTED_FINGERPRINT="SHA256:qBzmBVVw3+DheoJ9/2JWIJQiC0cKmKbqDlvRRQnyHlg"
+
+          if [[ "$KEY_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]]; then
+            echo
+            echo "ERROR: SSH key fingerprint does not match expected key."
+            echo
+            echo "Expected:"
+            echo "$EXPECTED_FINGERPRINT"
+            echo
+            echo "Received:"
+            echo "$KEY_FINGERPRINT"
+            exit 1
+          fi
 
           cat > "$HOME/.ssh/config" <<EOF
           Host sourceforge-frs
@@ -1002,7 +1021,7 @@ jobs:
 
 
       # ============================================================
-      # TEST SOURCEFORGE SSH
+      # TEST SOURCEFORGE
       # ============================================================
 
       - name: Test SourceForge SSH authentication
@@ -1018,38 +1037,18 @@ jobs:
           echo "Host: $SOURCEFORGE_HOST"
           echo "User: ${{ secrets.SOURCEFORGE_USER }}"
 
-          if ssh \
+          ssh \
             -o BatchMode=yes \
             -o ConnectTimeout=30 \
             sourceforge-frs \
             "echo SOURCEFORGE_AUTH_OK"
-          then
 
-            echo
-            echo "SourceForge SSH authentication successful."
-
-          else
-
-            echo
-            echo "=============================================="
-            echo "SOURCEFORGE AUTHENTICATION FAILED"
-            echo "=============================================="
-            echo
-            echo "Check the following:"
-            echo
-            echo "1. SOURCEFORGE_USER is correct."
-            echo "2. SOURCEFORGE_SSH_KEY contains the private key."
-            echo "3. Matching public key is added to SourceForge."
-            echo "4. SourceForge account has developer access."
-            echo "5. Private key does not require a passphrase."
-            echo
-
-            exit 1
-          fi
+          echo
+          echo "SourceForge SSH authentication successful."
 
 
       # ============================================================
-      # PREPARE SOURCEFORGE DEVICE DIRECTORY
+      # CREATE DEVICE DIRECTORY
       # ============================================================
 
       - name: Prepare SourceForge device directory
@@ -1064,14 +1063,6 @@ jobs:
           echo "SOURCEFORGE DEVICE DIRECTORY"
           echo "=============================================="
 
-          echo "Base:"
-          echo "$SOURCEFORGE_BASE"
-
-          echo
-          echo "Device:"
-          echo "$DEVICE"
-
-          echo
           echo "Remote directory:"
           echo "$DEVICE_DIR"
 
@@ -1085,7 +1076,7 @@ jobs:
 
 
       # ============================================================
-      # UPLOAD WITH RSYNC
+      # UPLOAD
       # ============================================================
 
       - name: Upload ROM to SourceForge
@@ -1101,16 +1092,15 @@ jobs:
           echo "UPLOAD ROM TO SOURCEFORGE"
           echo "=============================================="
 
-          echo "Local file:"
+          echo "Local:"
           echo "$LOCAL_FILE"
 
           echo
-          echo "Remote directory:"
+          echo "Remote:"
           echo "$REMOTE_DIR"
 
           echo
-          echo "Starting upload..."
-          echo
+          echo "Starting rsync upload..."
 
           rsync \
             -avP \
@@ -1126,7 +1116,7 @@ jobs:
 
 
       # ============================================================
-      # VERIFY REMOTE FILE
+      # VERIFY UPLOAD
       # ============================================================
 
       - name: Verify SourceForge upload
@@ -1140,9 +1130,6 @@ jobs:
           echo "=============================================="
           echo "VERIFY SOURCEFORGE UPLOAD"
           echo "=============================================="
-
-          echo "Remote file:"
-          echo "$REMOTE_FILE"
 
           REMOTE_SIZE="$(
             ssh \
@@ -1180,7 +1167,7 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "UPLOAD VERIFIED"
+          echo "UPLOAD VERIFIED SUCCESSFULLY"
           echo "=============================================="
 
 
@@ -1199,24 +1186,31 @@ jobs:
           echo "============================================================"
           echo "                 MISTOS UPLOAD COMPLETE"
           echo "============================================================"
+
           echo
           echo "Device:"
           echo "  $DEVICE"
+
           echo
           echo "File:"
           echo "  $FILE_NAME"
+
           echo
           echo "Size:"
           echo "  $(numfmt --to=iec "$FILE_SIZE")"
+
           echo
           echo "SHA256:"
           echo "  $FILE_SHA256"
+
           echo
           echo "SourceForge URL:"
           echo "  $SOURCEFORGE_URL"
+
           echo
           echo "Remote path:"
           echo "  $SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
+
           echo
           echo "============================================================"
 
@@ -1239,15 +1233,11 @@ jobs:
           if [[ -n "${WORK_DIR:-}" &&
                 -d "$WORK_DIR" ]]
           then
-            echo "Removing Gofile files..."
             rm -rf "$WORK_DIR"
           fi
-
-          echo "Removing SourceForge SSH files..."
 
           rm -f "$HOME/.ssh/sourceforge_mistos"
           rm -f "$HOME/.ssh/sourceforge_mistos.pub"
           rm -f "$HOME/.ssh/config"
 
-          echo
           echo "Cleanup completed."
