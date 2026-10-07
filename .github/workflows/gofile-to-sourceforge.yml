@@ -28,12 +28,14 @@ jobs:
       GOFILE_LANGUAGE: "en-US"
 
     steps:
+
       # ============================================================
       # CHECKOUT
       # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
 
       # ============================================================
       # INSTALL DEPENDENCIES
@@ -49,6 +51,7 @@ jobs:
           echo "============================================================"
 
           sudo apt-get update
+
           sudo apt-get install -y \
             curl \
             jq \
@@ -56,19 +59,18 @@ jobs:
             file
 
           echo
-          echo "Versions:"
+          echo "Installed versions:"
           curl --version | head -n 1
           jq --version
           node --version
-          sshpass -V 2>&1 | head -n 1 || true
           file --version | head -n 1
 
+
       # ============================================================
-      # PREPARE
+      # PREPARE WORKSPACE
       # ============================================================
 
       - name: Prepare workspace
-        id: prepare
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +85,10 @@ jobs:
           echo "============================================================"
           echo "PREPARING WORKSPACE"
           echo "============================================================"
-          echo "Workspace: $WORK"
+
+          echo "Workspace:"
+          echo "$WORK"
+
 
       # ============================================================
       # VALIDATE INPUTS
@@ -111,59 +116,62 @@ jobs:
             exit 1
           fi
 
-          # Only allow safe SourceForge directory names.
           if [[ ! "$DEVICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "ERROR: Invalid device name: $DEVICE"
+            echo "ERROR: Invalid device name:"
+            echo "$DEVICE"
+            echo
             echo "Allowed characters: A-Z a-z 0-9 . _ -"
             exit 1
           fi
 
-          echo "Gofile URL : $GOFILE_URL"
-          echo "Device     : $DEVICE"
+          echo
+          echo "Gofile URL:"
+          echo "$GOFILE_URL"
+
+          echo
+          echo "Device:"
+          echo "$DEVICE"
 
           echo "GOFILE_URL=$GOFILE_URL" >> "$GITHUB_ENV"
           echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+
 
       # ============================================================
       # EXTRACT GOFILE ID
       # ============================================================
 
       - name: Extract Gofile ID
-        id: gofile_id
         shell: bash
         run: |
           set -euo pipefail
 
           echo "============================================================"
-          echo "EXTRACTING GOFILE ID"
+          echo "EXTRACT GOFILE ID"
           echo "============================================================"
 
           GOFILE_ID=""
 
-          # Supports URLs such as:
-          #
-          # https://gofile.io/d/XXXXXXXX
-          # https://gofile.io/contents/XXXXXXXX
-          # https://gofile.io/d/XXXXXXXX?something
-          #
-
           if [[ "$GOFILE_URL" =~ /d/([^/?#]+) ]]; then
             GOFILE_ID="${BASH_REMATCH[1]}"
+
           elif [[ "$GOFILE_URL" =~ /contents/([^/?#]+) ]]; then
             GOFILE_ID="${BASH_REMATCH[1]}"
           fi
 
           if [[ -z "$GOFILE_ID" ]]; then
+            echo
             echo "ERROR: Could not extract Gofile content ID."
             echo
-            echo "Received:"
+            echo "URL:"
             echo "$GOFILE_URL"
             exit 1
           fi
 
-          echo "Gofile ID: $GOFILE_ID"
+          echo "Gofile ID:"
+          echo "$GOFILE_ID"
 
           echo "GOFILE_ID=$GOFILE_ID" >> "$GITHUB_ENV"
+
 
       # ============================================================
       # DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT
@@ -188,6 +196,7 @@ jobs:
           FOUND=0
 
           for URL in "${URLS[@]}"; do
+
             echo
             echo "Trying:"
             echo "$URL"
@@ -208,12 +217,17 @@ jobs:
 
             echo "HTTP: $HTTP_CODE"
 
-            if [[ "$HTTP_CODE" == "200" ]] && [[ -s "$WT_SCRIPT" ]]; then
+            if [[ "$HTTP_CODE" == "200" ]] &&
+               [[ -s "$WT_SCRIPT" ]]; then
+
               SIZE="$(wc -c < "$WT_SCRIPT")"
 
               if (( SIZE > 1000 )); then
+
+                echo
                 echo "WT script downloaded."
                 echo "WT script size: $SIZE bytes"
+
                 FOUND=1
                 break
               fi
@@ -221,16 +235,16 @@ jobs:
           done
 
           if [[ "$FOUND" != "1" ]]; then
+
             echo
-            echo "ERROR: Could not download Gofile website-token script."
+            echo "ERROR: Could not download Gofile WT script."
+
             exit 1
           fi
 
+
       # ============================================================
-      # EXTRACT WT SECRET
-      #
-      # This follows the current Gofile generateWT implementation
-      # pattern instead of trying to scrape an arbitrary salt.
+      # EXTRACT GOFILE WT SECRET
       # ============================================================
 
       - name: Extract Gofile WT secret
@@ -313,19 +327,9 @@ jobs:
             );
           }
 
-          /*
-           * Gofile's generateWT() internally hashes a string.
-           *
-           * Replace the internal _sha256 function with a probe
-           * function so we can capture the exact pre-hash input.
-           */
           context._sha256 = (input) => {
             rawHashInput = String(input);
 
-            /*
-             * Return a valid SHA-256-looking value so execution
-             * can continue.
-             */
             return "0".repeat(64);
           };
 
@@ -358,18 +362,9 @@ jobs:
 
           const parts = remainder.split("::");
 
-          /*
-           * Expected:
-           *
-           * userAgent::language::accountToken::timeWindow::secret
-           *
-           * Since accountToken is probeToken, remainder is:
-           *
-           * timeWindow::secret
-           */
           if (parts.length < 2) {
             throw new Error(
-              "Could not extract Gofile WT secret from hash input"
+              "Could not extract Gofile WT secret"
             );
           }
 
@@ -398,20 +393,18 @@ jobs:
           echo
           echo "Gofile WT secret extracted successfully."
 
-          # Do NOT print the secret.
-
           {
             echo "GOFILE_WT_SECRET<<EOF"
             echo "$SECRET"
             echo "EOF"
           } >> "$GITHUB_ENV"
 
+
       # ============================================================
       # CREATE GOFILE GUEST ACCOUNT
       # ============================================================
 
       - name: Create Gofile guest account
-        id: gofile_account
         shell: bash
         run: |
           set -euo pipefail
@@ -422,13 +415,11 @@ jobs:
 
           ACCOUNT_RESPONSE="$WORK/account.json"
 
-          CURRENT_WINDOW="$(
-            date +%s
-          )"
-
+          CURRENT_WINDOW="$(date +%s)"
           CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
 
-          echo "Current WT time window: $CURRENT_WINDOW"
+          echo "Current WT time window:"
+          echo "$CURRENT_WINDOW"
 
           WT_INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::::${CURRENT_WINDOW}::${GOFILE_WT_SECRET}"
 
@@ -438,6 +429,7 @@ jobs:
             awk '{print $1}'
           )"
 
+          echo
           echo "Creating guest account..."
 
           HTTP_CODE="$(
@@ -465,6 +457,7 @@ jobs:
           echo "HTTP status: $HTTP_CODE"
 
           if [[ "$HTTP_CODE" != "200" ]]; then
+
             echo
             echo "ERROR: Gofile guest account creation failed."
 
@@ -482,6 +475,7 @@ jobs:
           echo "API status: $API_STATUS"
 
           if [[ "$API_STATUS" != "ok" ]]; then
+
             echo
             echo "ERROR: Gofile account API did not return status=ok."
 
@@ -496,24 +490,22 @@ jobs:
           )"
 
           if [[ -z "$GOFILE_TOKEN" ]]; then
-            echo "ERROR: Gofile account token missing."
+            echo
+            echo "ERROR: Gofile account token is missing."
             exit 1
           fi
 
+          echo
           echo "Gofile guest account created successfully."
 
           echo "GOFILE_TOKEN=$GOFILE_TOKEN" >> "$GITHUB_ENV"
 
+
       # ============================================================
       # GET GOFILE CONTENT
-      #
-      # IMPORTANT:
-      # --compressed is required because Gofile can return
-      # gzip-compressed JSON.
       # ============================================================
 
-            - name: Get Gofile content
-        id: gofile_content
+      - name: Get Gofile content
         shell: bash
         run: |
           set -euo pipefail
@@ -529,8 +521,7 @@ jobs:
           CURRENT_WINDOW="$(date +%s)"
           CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
 
-          # Try current and previous time windows.
-          # This protects against a WT window rollover.
+          # Try current and previous WT time windows.
 
           for OFFSET in 0 1 2; do
 
@@ -579,12 +570,14 @@ jobs:
             if [[ "$HTTP_CODE" == "200" ]]; then
 
               STATUS="$(
-                jq -r '.status // empty' "$RESPONSE" 2>/dev/null || true
+                jq -r '.status // empty' "$RESPONSE" 2>/dev/null ||
+                true
               )"
 
               echo "API status: $STATUS"
 
               if [[ "$STATUS" == "ok" ]]; then
+
                 SUCCESS=1
 
                 echo
@@ -639,12 +632,12 @@ jobs:
             exit 1
           fi
 
+
       # ============================================================
       # EXTRACT ACTUAL FILE
       # ============================================================
 
       - name: Extract Gofile file information
-        id: file_info
         shell: bash
         run: |
           set -euo pipefail
@@ -665,7 +658,7 @@ jobs:
 
             FILE_JSON="$(
               jq -c '.data' "$RESPONSE"
-            )
+            )"
 
           else
 
@@ -689,7 +682,7 @@ jobs:
                       )
                     end
                 ' "$RESPONSE"
-              )
+              )"
 
             elif [[ "$CHILDREN_TYPE" == "array" ]]; then
 
@@ -707,10 +700,11 @@ jobs:
                       )
                     end
                 ' "$RESPONSE"
-              )
+              )"
 
             else
 
+              echo
               echo "ERROR: No usable Gofile file found."
               exit 1
 
@@ -743,27 +737,34 @@ jobs:
             GOFILE_SIZE=0
           fi
 
-          # Only keep the basename.
-          GOFILE_FILENAME="$(
-            basename -- "$GOFILE_FILENAME"
-          )"
+          GOFILE_FILENAME="$(basename -- "$GOFILE_FILENAME")"
 
-          # Prevent path traversal / weird filenames.
           if [[ "$GOFILE_FILENAME" == "." ||
                 "$GOFILE_FILENAME" == ".." ||
                 "$GOFILE_FILENAME" == */* ]]; then
-            echo "ERROR: Unsafe filename."
+
+            echo "ERROR: Unsafe filename:"
+            echo "$GOFILE_FILENAME"
+
             exit 1
           fi
 
           echo
-          echo "Filename : $GOFILE_FILENAME"
-          echo "Size     : $GOFILE_SIZE bytes"
-          echo "Download : $GOFILE_LINK"
+          echo "Filename:"
+          echo "$GOFILE_FILENAME"
+
+          echo
+          echo "Expected size:"
+          echo "$GOFILE_SIZE bytes"
+
+          echo
+          echo "Download URL:"
+          echo "$GOFILE_LINK"
 
           echo "GOFILE_FILENAME=$GOFILE_FILENAME" >> "$GITHUB_ENV"
           echo "GOFILE_LINK=$GOFILE_LINK" >> "$GITHUB_ENV"
           echo "GOFILE_SIZE=$GOFILE_SIZE" >> "$GITHUB_ENV"
+
 
       # ============================================================
       # DOWNLOAD ACTUAL FILE
@@ -780,6 +781,7 @@ jobs:
 
           DOWNLOAD="$WORK/$GOFILE_FILENAME"
 
+          echo
           echo "Downloading:"
           echo "$GOFILE_FILENAME"
 
@@ -806,12 +808,13 @@ jobs:
           )"
 
           echo
-          echo "Downloaded size: $ACTUAL_SIZE bytes"
+          echo "Downloaded size:"
+          echo "$ACTUAL_SIZE bytes"
 
           if (( ACTUAL_SIZE < 10240 )); then
+
             echo
             echo "ERROR: Downloaded file is suspiciously small."
-            echo "This usually means an HTML/JSON error page was downloaded."
 
             echo
             echo "File type:"
@@ -819,6 +822,7 @@ jobs:
 
             echo
             echo "First bytes:"
+
             head -c 512 "$DOWNLOAD" |
               strings ||
               true
@@ -830,7 +834,9 @@ jobs:
             file -b "$DOWNLOAD"
           )"
 
-          echo "File type: $FILE_TYPE"
+          echo
+          echo "File type:"
+          echo "$FILE_TYPE"
 
           if echo "$FILE_TYPE" |
              grep -Eiq 'HTML|XML|JSON|ASCII text|Unicode text'; then
@@ -848,14 +854,17 @@ jobs:
             awk '{print $1}'
           )"
 
-          echo "SHA256: $SHA256"
+          echo
+          echo "SHA256:"
+          echo "$SHA256"
 
           echo "DOWNLOADED_FILE=$DOWNLOAD" >> "$GITHUB_ENV"
           echo "DOWNLOADED_SIZE=$ACTUAL_SIZE" >> "$GITHUB_ENV"
           echo "DOWNLOADED_SHA256=$SHA256" >> "$GITHUB_ENV"
 
+
       # ============================================================
-      # SOURCEFORGE CREDENTIAL CHECK
+      # CHECK SOURCEFORGE CREDENTIALS
       # ============================================================
 
       - name: Check SourceForge credentials
@@ -880,8 +889,13 @@ jobs:
             exit 1
           fi
 
-          echo "SourceForge username: $SOURCEFORGE_USER"
-          echo "SourceForge password: configured"
+          echo "SourceForge username:"
+          echo "$SOURCEFORGE_USER"
+
+          echo
+          echo "SourceForge password:"
+          echo "configured"
+
 
       # ============================================================
       # TEST SOURCEFORGE CONNECTION
@@ -914,6 +928,7 @@ jobs:
           echo
           echo "SourceForge SFTP connection successful."
 
+
       # ============================================================
       # CHECK / CREATE DEVICE DIRECTORY
       # ============================================================
@@ -934,9 +949,11 @@ jobs:
 
           DEVICE_DIR="$SOURCEFORGE_BASE/$DEVICE"
 
+          echo
           echo "Base directory:"
           echo "$SOURCEFORGE_BASE"
 
+          echo
           echo "Device directory:"
           echo "$DEVICE_DIR"
 
@@ -958,8 +975,7 @@ jobs:
               > "$WORK/device_check.log" 2>&1; then
 
             echo
-            echo "Device directory already exists:"
-            echo "$DEVICE_DIR"
+            echo "Device directory already exists."
 
             cat "$WORK/device_check.log"
 
@@ -992,6 +1008,7 @@ jobs:
 
               echo
               echo "ERROR: Could not create SourceForge device directory."
+
               exit 1
             fi
 
@@ -1001,6 +1018,7 @@ jobs:
             echo "Device directory created successfully."
 
           fi
+
 
       # ============================================================
       # UPLOAD TO SOURCEFORGE
@@ -1048,6 +1066,7 @@ jobs:
           echo
           echo "SourceForge upload completed."
 
+
       # ============================================================
       # VERIFY SOURCEFORGE UPLOAD
       # ============================================================
@@ -1089,19 +1108,23 @@ jobs:
 
             echo
             echo "ERROR: Could not verify SourceForge upload."
+
             exit 1
           fi
 
           cat "$VERIFY_LOG"
 
           if ! grep -Fq "$GOFILE_FILENAME" "$VERIFY_LOG"; then
+
             echo
             echo "ERROR: Uploaded file was not found."
+
             exit 1
           fi
 
           echo
           echo "UPLOAD VERIFIED SUCCESSFULLY."
+
 
       # ============================================================
       # FINAL SUMMARY
@@ -1113,34 +1136,42 @@ jobs:
         run: |
           echo
           echo "============================================================"
-          echo "                MISTOS TRANSFER COMPLETE"
+          echo "             MISTOS TRANSFER COMPLETE"
           echo "============================================================"
+
           echo
           echo "Device:"
           echo "  $DEVICE"
+
           echo
           echo "Filename:"
           echo "  $GOFILE_FILENAME"
+
           echo
           echo "Size:"
           echo "  $DOWNLOADED_SIZE bytes"
+
           echo
           echo "SHA256:"
           echo "  $DOWNLOADED_SHA256"
+
           echo
           echo "SourceForge directory:"
           echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/"
+
           echo
           echo "File:"
           echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$GOFILE_FILENAME"
+
           echo
           echo "============================================================"
+
 
       # ============================================================
       # ALWAYS CLEANUP
       # ============================================================
 
-      - name: Cleanup downloaded files
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
@@ -1151,6 +1182,7 @@ jobs:
           echo "============================================================"
 
           if [[ -n "${WORK:-}" ]]; then
+
             echo "Removing:"
             echo "$WORK"
 
