@@ -24,7 +24,8 @@ jobs:
     env:
       SOURCEFORGE_HOST: frs.sourceforge.net
       SOURCEFORGE_BASE: /home/frs/project-mistos/Android17
-      GOFILE_USER_AGENT: "MistOS-Gofile-Downloader/1.0"
+
+      GOFILE_USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
       GOFILE_LANGUAGE: "en-US"
 
     steps:
@@ -174,7 +175,7 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT
+      # DOWNLOAD GOFILE WT SCRIPT
       # ============================================================
 
       - name: Get Gofile website-token script
@@ -223,7 +224,6 @@ jobs:
               SIZE="$(wc -c < "$WT_SCRIPT")"
 
               if (( SIZE > 1000 )); then
-
                 echo
                 echo "WT script downloaded."
                 echo "WT script size: $SIZE bytes"
@@ -235,16 +235,14 @@ jobs:
           done
 
           if [[ "$FOUND" != "1" ]]; then
-
             echo
             echo "ERROR: Could not download Gofile WT script."
-
             exit 1
           fi
 
 
       # ============================================================
-      # EXTRACT GOFILE WT SECRET
+      # EXTRACT DYNAMIC WT SECRET
       # ============================================================
 
       - name: Extract Gofile WT secret
@@ -329,7 +327,6 @@ jobs:
 
           context._sha256 = (input) => {
             rawHashInput = String(input);
-
             return "0".repeat(64);
           };
 
@@ -343,7 +340,7 @@ jobs:
 
           if (!rawHashInput) {
             throw new Error(
-              "generateWT() did not call the intercepted SHA-256 function"
+              "generateWT() did not call intercepted SHA-256"
             );
           }
 
@@ -457,7 +454,6 @@ jobs:
           echo "HTTP status: $HTTP_CODE"
 
           if [[ "$HTTP_CODE" != "200" ]]; then
-
             echo
             echo "ERROR: Gofile guest account creation failed."
 
@@ -475,7 +471,6 @@ jobs:
           echo "API status: $API_STATUS"
 
           if [[ "$API_STATUS" != "ok" ]]; then
-
             echo
             echo "ERROR: Gofile account API did not return status=ok."
 
@@ -490,7 +485,6 @@ jobs:
           )"
 
           if [[ -z "$GOFILE_TOKEN" ]]; then
-            echo
             echo "ERROR: Gofile account token is missing."
             exit 1
           fi
@@ -521,7 +515,7 @@ jobs:
           CURRENT_WINDOW="$(date +%s)"
           CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
 
-          # Try current and previous WT time windows.
+          # Try current and previous WT windows.
 
           for OFFSET in 0 1 2; do
 
@@ -623,9 +617,6 @@ jobs:
             echo "============================================================"
             echo "GOFILE CONTENT REQUEST FAILED"
             echo "============================================================"
-
-            echo
-            echo "Raw response:"
 
             cat "$RESPONSE" 2>/dev/null || true
 
@@ -733,10 +724,6 @@ jobs:
             exit 1
           fi
 
-          if [[ "$GOFILE_SIZE" == "null" ]]; then
-            GOFILE_SIZE=0
-          fi
-
           GOFILE_FILENAME="$(basename -- "$GOFILE_FILENAME")"
 
           if [[ "$GOFILE_FILENAME" == "." ||
@@ -758,7 +745,7 @@ jobs:
           echo "$GOFILE_SIZE bytes"
 
           echo
-          echo "Download URL:"
+          echo "Direct link:"
           echo "$GOFILE_LINK"
 
           echo "GOFILE_FILENAME=$GOFILE_FILENAME" >> "$GITHUB_ENV"
@@ -767,7 +754,19 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD ACTUAL FILE
+      # DOWNLOAD ACTUAL FILE FROM GOFILE
+      #
+      # IMPORTANT:
+      #
+      # Gofile's direct link may return the Gofile HTML page unless
+      # the guest accountToken cookie is established first.
+      #
+      # We therefore:
+      #
+      # 1. Create a cookie jar.
+      # 2. Open the share page with accountToken cookie.
+      # 3. Download the direct link with the same cookie.
+      #
       # ============================================================
 
       - name: Download file from Gofile
@@ -781,25 +780,134 @@ jobs:
 
           DOWNLOAD="$WORK/$GOFILE_FILENAME"
 
+          COOKIE_JAR="$WORK/gofile.cookies"
+          PAGE_RESPONSE="$WORK/gofile_page.html"
+          DOWNLOAD_HEADERS="$WORK/download_headers.txt"
+
+          rm -f \
+            "$COOKIE_JAR" \
+            "$PAGE_RESPONSE" \
+            "$DOWNLOAD_HEADERS" \
+            "$DOWNLOAD"
+
           echo
-          echo "Downloading:"
+          echo "Filename:"
           echo "$GOFILE_FILENAME"
 
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            --retry 3 \
-            --retry-delay 5 \
-            --connect-timeout 30 \
-            --max-time 3600 \
-            -A "$GOFILE_USER_AGENT" \
-            --output "$DOWNLOAD" \
-            "$GOFILE_LINK"
+          echo
+          echo "Expected size:"
+          echo "$GOFILE_SIZE bytes"
+
+          # --------------------------------------------------------
+          # STEP 1
+          # Open the original Gofile page using the guest account.
+          # --------------------------------------------------------
+
+          echo
+          echo "Opening Gofile share page..."
+
+          PAGE_HTTP_CODE="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --compressed \
+              --cookie "accountToken=${GOFILE_TOKEN}" \
+              --cookie-jar "$COOKIE_JAR" \
+              --output "$PAGE_RESPONSE" \
+              --write-out "%{http_code}" \
+              --connect-timeout 30 \
+              --max-time 90 \
+              -A "$GOFILE_USER_AGENT" \
+              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+              -H "Accept-Language: ${GOFILE_LANGUAGE},en;q=0.9" \
+              -H "Referer: https://gofile.io/" \
+              "$GOFILE_URL" \
+              || true
+          )"
+
+          echo "Share page HTTP status: $PAGE_HTTP_CODE"
+
+          if [[ "$PAGE_HTTP_CODE" != "200" ]]; then
+
+            echo
+            echo "WARNING: Share page returned HTTP $PAGE_HTTP_CODE."
+
+            echo "Continuing with accountToken cookie anyway."
+
+          else
+
+            echo "Gofile share page loaded successfully."
+
+          fi
+
+          # --------------------------------------------------------
+          # STEP 2
+          # Make absolutely sure accountToken is in cookie jar.
+          # --------------------------------------------------------
+
+          echo
+          echo "Preparing Gofile authentication cookie..."
+
+          printf '# Netscape HTTP Cookie File\n' > "$COOKIE_JAR"
+
+          printf 'gofile.io\tTRUE\t/\tFALSE\t0\taccountToken\t%s\n' \
+            "$GOFILE_TOKEN" >> "$COOKIE_JAR"
+
+          echo "accountToken cookie prepared."
+
+
+          # --------------------------------------------------------
+          # STEP 3
+          # Download actual direct link.
+          # --------------------------------------------------------
+
+          echo
+          echo "Downloading actual file..."
+
+          echo
+          echo "Direct link:"
+          echo "$GOFILE_LINK"
+
+          HTTP_CODE="$(
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --compressed \
+              --retry 5 \
+              --retry-delay 5 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --max-time 7200 \
+              --cookie "$COOKIE_JAR" \
+              --dump-header "$DOWNLOAD_HEADERS" \
+              -A "$GOFILE_USER_AGENT" \
+              -H "Accept: */*" \
+              -H "Accept-Language: ${GOFILE_LANGUAGE},en;q=0.9" \
+              -H "Authorization: Bearer ${GOFILE_TOKEN}" \
+              -H "Referer: ${GOFILE_URL}" \
+              -H "Origin: https://gofile.io" \
+              --output "$DOWNLOAD" \
+              --write-out "%{http_code}" \
+              "$GOFILE_LINK"
+          )"
+
+          echo
+          echo "Download HTTP status:"
+          echo "$HTTP_CODE"
+
+          # --------------------------------------------------------
+          # STEP 4
+          # Validate file exists.
+          # --------------------------------------------------------
 
           if [[ ! -f "$DOWNLOAD" ]]; then
+
+            echo
             echo "ERROR: Downloaded file does not exist."
+
             exit 1
           fi
 
@@ -811,40 +919,100 @@ jobs:
           echo "Downloaded size:"
           echo "$ACTUAL_SIZE bytes"
 
-          if (( ACTUAL_SIZE < 10240 )); then
-
-            echo
-            echo "ERROR: Downloaded file is suspiciously small."
-
-            echo
-            echo "File type:"
-            file "$DOWNLOAD"
-
-            echo
-            echo "First bytes:"
-
-            head -c 512 "$DOWNLOAD" |
-              strings ||
-              true
-
-            exit 1
-          fi
+          # --------------------------------------------------------
+          # STEP 5
+          # Detect HTML/error page.
+          # --------------------------------------------------------
 
           FILE_TYPE="$(
             file -b "$DOWNLOAD"
           )"
 
           echo
-          echo "File type:"
+          echo "Detected file type:"
           echo "$FILE_TYPE"
 
           if echo "$FILE_TYPE" |
              grep -Eiq 'HTML|XML|JSON|ASCII text|Unicode text'; then
 
             echo
-            echo "ERROR: Download appears to be an error page."
+            echo "============================================================"
+            echo "ERROR: GOFILE RETURNED HTML/ERROR PAGE"
+            echo "============================================================"
+
+            echo
+            echo "The direct download request returned:"
+            echo "$FILE_TYPE"
+
+            echo
+            echo "First 1000 bytes:"
+
+            head -c 1000 "$DOWNLOAD" |
+              strings ||
+              true
+
+            echo
+            echo "Download response headers:"
+
+            cat "$DOWNLOAD_HEADERS" 2>/dev/null || true
+
+            echo
+            echo "This is NOT the ROM file."
+
             exit 1
           fi
+
+          # --------------------------------------------------------
+          # STEP 6
+          # Size sanity check.
+          # --------------------------------------------------------
+
+          if (( ACTUAL_SIZE < 10240 )); then
+
+            echo
+            echo "ERROR: Downloaded file is suspiciously small."
+            echo "Expected at least 10 KB."
+            echo "Actual: $ACTUAL_SIZE bytes"
+
+            exit 1
+          fi
+
+          # --------------------------------------------------------
+          # STEP 7
+          # Compare against Gofile metadata when available.
+          # --------------------------------------------------------
+
+          if [[ "$GOFILE_SIZE" =~ ^[0-9]+$ ]] &&
+             (( GOFILE_SIZE > 0 )); then
+
+            echo
+            echo "Checking expected Gofile size..."
+
+            if (( ACTUAL_SIZE != GOFILE_SIZE )); then
+
+              echo
+              echo "WARNING: Downloaded size differs from Gofile metadata."
+
+              echo "Gofile metadata:"
+              echo "$GOFILE_SIZE bytes"
+
+              echo "Downloaded:"
+              echo "$ACTUAL_SIZE bytes"
+
+              echo
+              echo "Continuing because the response is not HTML."
+              echo "Some Gofile links may use transfer encoding."
+            else
+
+              echo "Size matches Gofile metadata."
+
+            fi
+          fi
+
+          # --------------------------------------------------------
+          # STEP 8
+          # SHA256
+          # --------------------------------------------------------
 
           echo
           echo "Calculating SHA256..."
@@ -857,6 +1025,9 @@ jobs:
           echo
           echo "SHA256:"
           echo "$SHA256"
+
+          echo
+          echo "Gofile download verified."
 
           echo "DOWNLOADED_FILE=$DOWNLOAD" >> "$GITHUB_ENV"
           echo "DOWNLOADED_SIZE=$ACTUAL_SIZE" >> "$GITHUB_ENV"
@@ -983,6 +1154,7 @@ jobs:
 
             echo
             echo "Device directory does not exist."
+
             echo "Creating:"
             echo "$DEVICE_DIR"
 
