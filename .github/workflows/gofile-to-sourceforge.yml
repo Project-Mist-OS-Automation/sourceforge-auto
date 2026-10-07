@@ -23,7 +23,7 @@ jobs:
 
     env:
       SOURCEFORGE_HOST: frs.sourceforge.net
-      SOURCEFORGE_BASE: /home/frs/project-mistos/Android17
+      SOURCEFORGE_BASE: /home/frs/project/project-mistos/Android17
 
       GOFILE_USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
       GOFILE_LANGUAGE: "en-US"
@@ -61,9 +61,11 @@ jobs:
 
           echo
           echo "Installed versions:"
+
           curl --version | head -n 1
           jq --version
           node --version
+          sshpass -V 2>&1 | head -n 1
           file --version | head -n 1
 
 
@@ -121,7 +123,8 @@ jobs:
             echo "ERROR: Invalid device name:"
             echo "$DEVICE"
             echo
-            echo "Allowed characters: A-Z a-z 0-9 . _ -"
+            echo "Allowed:"
+            echo "A-Z a-z 0-9 . _ -"
             exit 1
           fi
 
@@ -224,6 +227,7 @@ jobs:
               SIZE="$(wc -c < "$WT_SCRIPT")"
 
               if (( SIZE > 1000 )); then
+
                 echo
                 echo "WT script downloaded."
                 echo "WT script size: $SIZE bytes"
@@ -454,6 +458,7 @@ jobs:
           echo "HTTP status: $HTTP_CODE"
 
           if [[ "$HTTP_CODE" != "200" ]]; then
+
             echo
             echo "ERROR: Gofile guest account creation failed."
 
@@ -471,6 +476,7 @@ jobs:
           echo "API status: $API_STATUS"
 
           if [[ "$API_STATUS" != "ok" ]]; then
+
             echo
             echo "ERROR: Gofile account API did not return status=ok."
 
@@ -485,6 +491,7 @@ jobs:
           )"
 
           if [[ -z "$GOFILE_TOKEN" ]]; then
+            echo
             echo "ERROR: Gofile account token is missing."
             exit 1
           fi
@@ -514,8 +521,6 @@ jobs:
 
           CURRENT_WINDOW="$(date +%s)"
           CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
-
-          # Try current and previous WT windows.
 
           for OFFSET in 0 1 2; do
 
@@ -754,19 +759,7 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD ACTUAL FILE FROM GOFILE
-      #
-      # IMPORTANT:
-      #
-      # Gofile's direct link may return the Gofile HTML page unless
-      # the guest accountToken cookie is established first.
-      #
-      # We therefore:
-      #
-      # 1. Create a cookie jar.
-      # 2. Open the share page with accountToken cookie.
-      # 3. Download the direct link with the same cookie.
-      #
+      # DOWNLOAD ACTUAL FILE
       # ============================================================
 
       - name: Download file from Gofile
@@ -799,8 +792,7 @@ jobs:
           echo "$GOFILE_SIZE bytes"
 
           # --------------------------------------------------------
-          # STEP 1
-          # Open the original Gofile page using the guest account.
+          # Establish Gofile accountToken cookie.
           # --------------------------------------------------------
 
           echo
@@ -828,46 +820,21 @@ jobs:
 
           echo "Share page HTTP status: $PAGE_HTTP_CODE"
 
-          if [[ "$PAGE_HTTP_CODE" != "200" ]]; then
-
-            echo
-            echo "WARNING: Share page returned HTTP $PAGE_HTTP_CODE."
-
-            echo "Continuing with accountToken cookie anyway."
-
-          else
-
-            echo "Gofile share page loaded successfully."
-
-          fi
-
-          # --------------------------------------------------------
-          # STEP 2
-          # Make absolutely sure accountToken is in cookie jar.
-          # --------------------------------------------------------
-
-          echo
-          echo "Preparing Gofile authentication cookie..."
-
+          # Explicitly create the accountToken cookie as well.
           printf '# Netscape HTTP Cookie File\n' > "$COOKIE_JAR"
 
           printf 'gofile.io\tTRUE\t/\tFALSE\t0\taccountToken\t%s\n' \
             "$GOFILE_TOKEN" >> "$COOKIE_JAR"
 
-          echo "accountToken cookie prepared."
-
+          echo
+          echo "Gofile accountToken cookie prepared."
 
           # --------------------------------------------------------
-          # STEP 3
-          # Download actual direct link.
+          # Download actual file.
           # --------------------------------------------------------
 
           echo
           echo "Downloading actual file..."
-
-          echo
-          echo "Direct link:"
-          echo "$GOFILE_LINK"
 
           HTTP_CODE="$(
             curl \
@@ -898,16 +865,9 @@ jobs:
           echo "Download HTTP status:"
           echo "$HTTP_CODE"
 
-          # --------------------------------------------------------
-          # STEP 4
-          # Validate file exists.
-          # --------------------------------------------------------
-
           if [[ ! -f "$DOWNLOAD" ]]; then
-
             echo
             echo "ERROR: Downloaded file does not exist."
-
             exit 1
           fi
 
@@ -919,11 +879,6 @@ jobs:
           echo "Downloaded size:"
           echo "$ACTUAL_SIZE bytes"
 
-          # --------------------------------------------------------
-          # STEP 5
-          # Detect HTML/error page.
-          # --------------------------------------------------------
-
           FILE_TYPE="$(
             file -b "$DOWNLOAD"
           )"
@@ -931,6 +886,10 @@ jobs:
           echo
           echo "Detected file type:"
           echo "$FILE_TYPE"
+
+          # --------------------------------------------------------
+          # Reject Gofile HTML page.
+          # --------------------------------------------------------
 
           if echo "$FILE_TYPE" |
              grep -Eiq 'HTML|XML|JSON|ASCII text|Unicode text'; then
@@ -941,10 +900,6 @@ jobs:
             echo "============================================================"
 
             echo
-            echo "The direct download request returned:"
-            echo "$FILE_TYPE"
-
-            echo
             echo "First 1000 bytes:"
 
             head -c 1000 "$DOWNLOAD" |
@@ -952,66 +907,27 @@ jobs:
               true
 
             echo
-            echo "Download response headers:"
+            echo "Response headers:"
 
             cat "$DOWNLOAD_HEADERS" 2>/dev/null || true
-
-            echo
-            echo "This is NOT the ROM file."
 
             exit 1
           fi
 
           # --------------------------------------------------------
-          # STEP 6
-          # Size sanity check.
+          # Minimum size.
           # --------------------------------------------------------
 
           if (( ACTUAL_SIZE < 10240 )); then
 
             echo
             echo "ERROR: Downloaded file is suspiciously small."
-            echo "Expected at least 10 KB."
-            echo "Actual: $ACTUAL_SIZE bytes"
 
             exit 1
           fi
 
           # --------------------------------------------------------
-          # STEP 7
-          # Compare against Gofile metadata when available.
-          # --------------------------------------------------------
-
-          if [[ "$GOFILE_SIZE" =~ ^[0-9]+$ ]] &&
-             (( GOFILE_SIZE > 0 )); then
-
-            echo
-            echo "Checking expected Gofile size..."
-
-            if (( ACTUAL_SIZE != GOFILE_SIZE )); then
-
-              echo
-              echo "WARNING: Downloaded size differs from Gofile metadata."
-
-              echo "Gofile metadata:"
-              echo "$GOFILE_SIZE bytes"
-
-              echo "Downloaded:"
-              echo "$ACTUAL_SIZE bytes"
-
-              echo
-              echo "Continuing because the response is not HTML."
-              echo "Some Gofile links may use transfer encoding."
-            else
-
-              echo "Size matches Gofile metadata."
-
-            fi
-          fi
-
-          # --------------------------------------------------------
-          # STEP 8
-          # SHA256
+          # SHA256.
           # --------------------------------------------------------
 
           echo
@@ -1035,7 +951,7 @@ jobs:
 
 
       # ============================================================
-      # CHECK SOURCEFORGE CREDENTIALS
+      # SOURCEFORGE CREDENTIAL CHECK
       # ============================================================
 
       - name: Check SourceForge credentials
@@ -1069,10 +985,10 @@ jobs:
 
 
       # ============================================================
-      # TEST SOURCEFORGE CONNECTION
+      # SOURCEFORGE AUTHENTICATION TEST
       # ============================================================
 
-      - name: Test SourceForge SFTP
+      - name: Test SourceForge authentication
         shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
@@ -1081,23 +997,51 @@ jobs:
           set -euo pipefail
 
           echo "============================================================"
-          echo "TEST SOURCEFORGE SFTP"
+          echo "TEST SOURCEFORGE AUTHENTICATION"
           echo "============================================================"
 
           export SSHPASS="$SOURCEFORGE_PASSWORD"
 
-          sftp \
-            -oBatchMode=no \
-            -oStrictHostKeyChecking=no \
-            -oUserKnownHostsFile=/dev/null \
-            -oConnectTimeout=30 \
-            "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" <<EOF
-          pwd
-          ls
-          EOF
+          echo
+          echo "Connecting to:"
+          echo "$SOURCEFORGE_HOST"
 
           echo
-          echo "SourceForge SFTP connection successful."
+          echo "Authentication methods:"
+          echo "  keyboard-interactive"
+          echo "  password"
+
+          sshpass -e \
+            ssh \
+              -T \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=30 \
+              -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=keyboard-interactive,password \
+              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
+              "pwd" \
+              || {
+
+                echo
+                echo "============================================================"
+                echo "SOURCEFORGE AUTHENTICATION FAILED"
+                echo "============================================================"
+                echo
+                echo "SourceForge rejected password authentication."
+                echo
+                echo "If your SourceForge account has 2FA enabled,"
+                echo "a password alone is not sufficient for this"
+                echo "non-interactive GitHub Actions workflow."
+                echo
+                echo "In that case, use an SSH key for SourceForge."
+                echo
+
+                exit 1
+              }
+
+          echo
+          echo "SourceForge authentication successful."
 
 
       # ============================================================
@@ -1121,82 +1065,59 @@ jobs:
           DEVICE_DIR="$SOURCEFORGE_BASE/$DEVICE"
 
           echo
-          echo "Base directory:"
-          echo "$SOURCEFORGE_BASE"
-
-          echo
           echo "Device directory:"
           echo "$DEVICE_DIR"
 
-          CHECK_SCRIPT="$WORK/check_device.sftp"
+          # --------------------------------------------------------
+          # Check whether directory exists.
+          # --------------------------------------------------------
 
-          cat > "$CHECK_SCRIPT" <<EOF
-          cd $SOURCEFORGE_BASE
-          ls $DEVICE
-          bye
-          EOF
-
-          if sftp \
-              -oBatchMode=no \
-              -oStrictHostKeyChecking=no \
-              -oUserKnownHostsFile=/dev/null \
-              -oConnectTimeout=30 \
-              -b "$CHECK_SCRIPT" \
+          if sshpass -e \
+            ssh \
+              -T \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=30 \
+              -o PubkeyAuthentication=no \
+              -o PreferredAuthentications=keyboard-interactive,password \
               "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-              > "$WORK/device_check.log" 2>&1; then
+              "test -d '$DEVICE_DIR'"; then
 
             echo
             echo "Device directory already exists."
-
-            cat "$WORK/device_check.log"
 
           else
 
             echo
             echo "Device directory does not exist."
-
             echo "Creating:"
             echo "$DEVICE_DIR"
 
-            CREATE_SCRIPT="$WORK/create_device.sftp"
-
-            cat > "$CREATE_SCRIPT" <<EOF
-          cd $SOURCEFORGE_BASE
-          mkdir $DEVICE
-          ls $DEVICE
-          bye
-          EOF
-
-            if ! sftp \
-                -oBatchMode=no \
-                -oStrictHostKeyChecking=no \
-                -oUserKnownHostsFile=/dev/null \
-                -oConnectTimeout=30 \
-                -b "$CREATE_SCRIPT" \
+            sshpass -e \
+              ssh \
+                -T \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=30 \
+                -o PubkeyAuthentication=no \
+                -o PreferredAuthentications=keyboard-interactive,password \
                 "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-                > "$WORK/device_create.log" 2>&1; then
-
-              cat "$WORK/device_create.log"
-
-              echo
-              echo "ERROR: Could not create SourceForge device directory."
-
-              exit 1
-            fi
-
-            cat "$WORK/device_create.log"
+                "mkdir -p '$DEVICE_DIR'"
 
             echo
-            echo "Device directory created successfully."
+            echo "Device directory created."
 
           fi
 
 
       # ============================================================
       # UPLOAD TO SOURCEFORGE
+      #
+      # For large ROM files, rsync is preferred by SourceForge.
+      # It can resume interrupted transfers.
       # ============================================================
 
-      - name: Upload file to SourceForge
+      - name: Upload to SourceForge
         shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
@@ -1210,37 +1131,34 @@ jobs:
 
           export SSHPASS="$SOURCEFORGE_PASSWORD"
 
-          UPLOAD_SCRIPT="$WORK/upload.sftp"
-
-          cat > "$UPLOAD_SCRIPT" <<EOF
-          cd $SOURCEFORGE_BASE/$DEVICE
-          put $DOWNLOADED_FILE $GOFILE_FILENAME
-          ls -l $GOFILE_FILENAME
-          bye
-          EOF
+          REMOTE_PATH="$SOURCEFORGE_BASE/$DEVICE/$GOFILE_FILENAME"
 
           echo
-          echo "Uploading:"
-          echo "$GOFILE_FILENAME"
+          echo "Local file:"
+          echo "$DOWNLOADED_FILE"
 
           echo
-          echo "Destination:"
-          echo "$SOURCEFORGE_BASE/$DEVICE/"
+          echo "Remote file:"
+          echo "$REMOTE_PATH"
 
-          sftp \
-            -oBatchMode=no \
-            -oStrictHostKeyChecking=no \
-            -oUserKnownHostsFile=/dev/null \
-            -oConnectTimeout=30 \
-            -b "$UPLOAD_SCRIPT" \
-            "$SOURCEFORGE_USER@$SOURCEFORGE_HOST"
+          echo
+          echo "Uploading..."
+
+          sshpass -e \
+            rsync \
+              -avP \
+              --partial \
+              --progress \
+              -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password" \
+              "$DOWNLOADED_FILE" \
+              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST:$REMOTE_PATH"
 
           echo
           echo "SourceForge upload completed."
 
 
       # ============================================================
-      # VERIFY SOURCEFORGE UPLOAD
+      # VERIFY UPLOAD
       # ============================================================
 
       - name: Verify SourceForge upload
@@ -1257,39 +1175,33 @@ jobs:
 
           export SSHPASS="$SOURCEFORGE_PASSWORD"
 
-          VERIFY_SCRIPT="$WORK/verify.sftp"
+          REMOTE_PATH="$SOURCEFORGE_BASE/$DEVICE/$GOFILE_FILENAME"
 
-          cat > "$VERIFY_SCRIPT" <<EOF
-          cd $SOURCEFORGE_BASE/$DEVICE
-          ls -l $GOFILE_FILENAME
-          bye
-          EOF
+          REMOTE_SIZE="$(
+            sshpass -e \
+              ssh \
+                -T \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=30 \
+                -o PubkeyAuthentication=no \
+                -o PreferredAuthentications=keyboard-interactive,password \
+                "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
+                "stat -c '%s' '$REMOTE_PATH'"
+          )"
 
-          VERIFY_LOG="$WORK/verify.log"
+          echo
+          echo "Local size:"
+          echo "$DOWNLOADED_SIZE bytes"
 
-          if ! sftp \
-              -oBatchMode=no \
-              -oStrictHostKeyChecking=no \
-              -oUserKnownHostsFile=/dev/null \
-              -oConnectTimeout=30 \
-              -b "$VERIFY_SCRIPT" \
-              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-              > "$VERIFY_LOG" 2>&1; then
+          echo
+          echo "Remote size:"
+          echo "$REMOTE_SIZE bytes"
 
-            cat "$VERIFY_LOG"
-
-            echo
-            echo "ERROR: Could not verify SourceForge upload."
-
-            exit 1
-          fi
-
-          cat "$VERIFY_LOG"
-
-          if ! grep -Fq "$GOFILE_FILENAME" "$VERIFY_LOG"; then
+          if [[ "$REMOTE_SIZE" != "$DOWNLOADED_SIZE" ]]; then
 
             echo
-            echo "ERROR: Uploaded file was not found."
+            echo "ERROR: SourceForge file size does not match."
 
             exit 1
           fi
@@ -1354,7 +1266,6 @@ jobs:
           echo "============================================================"
 
           if [[ -n "${WORK:-}" ]]; then
-
             echo "Removing:"
             echo "$WORK"
 
