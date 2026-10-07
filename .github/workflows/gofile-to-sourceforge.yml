@@ -58,7 +58,10 @@ jobs:
             nodejs
 
           echo
-          echo "Installed versions:"
+          echo "=============================================="
+          echo "DEPENDENCIES"
+          echo "=============================================="
+
           curl --version | head -n 1
           jq --version
           node --version
@@ -74,13 +77,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/mistos-gofile"
+          WORK_DIR="$RUNNER_TEMP/mistos-gofile"
 
-          echo "WORK_DIR=$RUNNER_TEMP/mistos-gofile" >> "$GITHUB_ENV"
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+
+          chmod 700 "$WORK_DIR"
+
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
 
           echo
-          echo "Workspace:"
-          echo "$RUNNER_TEMP/mistos-gofile"
+          echo "=============================================="
+          echo "WORKSPACE"
+          echo "=============================================="
+          echo "WORK_DIR:"
+          echo "$WORK_DIR"
+
+          echo
+          echo "Testing workspace write access..."
+
+          TEST_FILE="$WORK_DIR/test"
+
+          printf 'test\n' > "$TEST_FILE"
+
+          if [[ ! -s "$TEST_FILE" ]]; then
+            echo "ERROR: Cannot write to WORK_DIR."
+            exit 1
+          fi
+
+          rm -f "$TEST_FILE"
+
+          echo "Workspace is writable."
 
 
       # ============================================================
@@ -113,7 +140,6 @@ jobs:
             exit 1
           fi
 
-          # Device directory must contain only safe characters.
           if [[ ! "$DEVICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
             echo "ERROR: Invalid device name."
             echo "Allowed characters: A-Z a-z 0-9 . _ -"
@@ -129,53 +155,6 @@ jobs:
           echo "=============================================="
           echo "Gofile URL : $GOFILE_URL"
           echo "Device     : $DEVICE"
-
-
-      # ============================================================
-      # CLEANUP TRAP
-      # ============================================================
-
-      - name: Configure cleanup
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > "$WORK_DIR/cleanup.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set +e
-
-          echo
-          echo "=============================================="
-          echo "CLEANUP"
-          echo "=============================================="
-
-          if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
-            echo "Removing downloaded files..."
-            rm -rf "$WORK_DIR"
-          fi
-
-          if [[ -f "$HOME/.ssh/sourceforge_mistos" ]]; then
-            rm -f "$HOME/.ssh/sourceforge_mistos"
-          fi
-
-          if [[ -f "$HOME/.ssh/sourceforge_mistos.pub" ]]; then
-            rm -f "$HOME/.ssh/sourceforge_mistos.pub"
-          fi
-
-          if [[ -f "$HOME/.ssh/config" ]]; then
-            rm -f "$HOME/.ssh/config"
-          fi
-
-          if [[ -f "$HOME/.ssh/known_hosts" ]]; then
-            rm -f "$HOME/.ssh/known_hosts"
-          fi
-
-          echo "Cleanup completed."
-          EOF
-
-          chmod +x "$WORK_DIR/cleanup.sh"
-
-          trap '"$WORK_DIR/cleanup.sh"' EXIT
 
 
       # ============================================================
@@ -198,7 +177,7 @@ jobs:
           fi
 
           if [[ -z "$GOFILE_ID" ]]; then
-            echo "ERROR: Could not extract Gofile content ID."
+            echo "ERROR: Could not extract Gofile ID."
             echo "URL: $GOFILE_URL"
             exit 1
           fi
@@ -221,89 +200,88 @@ jobs:
         run: |
           set -euo pipefail
 
-          WT_SCRIPT="$WORK_DIR/wt.js"
-
           echo
           echo "=============================================="
           echo "DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT"
           echo "=============================================="
 
-          STATUS="$(curl \
+          mkdir -p "$WORK_DIR"
+
+          WT_SCRIPT="$WORK_DIR/wt.js"
+
+          rm -f "$WT_SCRIPT"
+
+          echo "Downloading current Gofile WT script..."
+
+          if curl \
             --silent \
             --show-error \
             --location \
-            --write-out "%{http_code}" \
-            --output "$WT_SCRIPT" \
+            --fail \
             --connect-timeout 30 \
-            --max-time 60 \
-            "https://gofile.io/js/wt.obf.js")"
-
-          if [[ "$STATUS" != "200" || ! -s "$WT_SCRIPT" ]]; then
+            --max-time 120 \
+            --output "$WT_SCRIPT" \
+            "https://gofile.io/js/wt.obf.js"
+          then
+            echo "Primary WT script downloaded."
+          else
             echo "Primary WT script failed."
-
             echo "Trying fallback location..."
 
-            STATUS="$(curl \
+            rm -f "$WT_SCRIPT"
+
+            curl \
               --silent \
               --show-error \
               --location \
-              --write-out "%{http_code}" \
-              --output "$WT_SCRIPT" \
+              --fail \
               --connect-timeout 30 \
-              --max-time 60 \
-              "https://gofile.io/dist/js/wt.obf.js")"
+              --max-time 120 \
+              --output "$WT_SCRIPT" \
+              "https://gofile.io/dist/js/wt.obf.js"
           fi
 
-          if [[ "$STATUS" != "200" || ! -s "$WT_SCRIPT" ]]; then
-            echo "ERROR: Could not download Gofile WT script."
-            echo "HTTP status: $STATUS"
+          if [[ ! -f "$WT_SCRIPT" ]]; then
+            echo "ERROR: WT script was not created."
             exit 1
           fi
 
-          echo "WT script downloaded successfully."
-          echo "Size: $(stat -c '%s' "$WT_SCRIPT") bytes"
-
-
-      # ============================================================
-      # EXTRACT DYNAMIC GOFILE WT SECRET
-      # ============================================================
-
-      - name: Extract Gofile Website Token secret
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          WT_SCRIPT="$WORK_DIR/wt.js"
-          WT_SECRET_FILE="$WORK_DIR/wt-secret"
-
-          node "$WORK_DIR/extract-wt.js" "$WT_SCRIPT" "$WT_SECRET_FILE"
-
-          if [[ ! -s "$WT_SECRET_FILE" ]]; then
-            echo "ERROR: WT secret extraction failed."
+          if [[ ! -s "$WT_SCRIPT" ]]; then
+            echo "ERROR: WT script is empty."
             exit 1
           fi
 
-          WT_SECRET="$(cat "$WT_SECRET_FILE")"
-
-          if [[ -z "$WT_SECRET" ]]; then
-            echo "ERROR: WT secret is empty."
-            exit 1
-          fi
-
-          echo "GOFILE_WT_SECRET=$WT_SECRET" >> "$GITHUB_ENV"
+          WT_SIZE="$(stat -c '%s' "$WT_SCRIPT")"
 
           echo
-          echo "Gofile Website Token secret extracted successfully."
+          echo "WT script size: $WT_SIZE bytes"
+
+          if [[ "$WT_SIZE" -lt 1000 ]]; then
+            echo
+            echo "ERROR: WT script is suspiciously small."
+            echo
+            echo "Response:"
+            head -c 2000 "$WT_SCRIPT" || true
+            exit 1
+          fi
+
+          echo
+          echo "Gofile WT script downloaded successfully."
 
 
       # ============================================================
-      # CREATE NODE WT EXTRACTION SCRIPT
+      # CREATE WT EXTRACTION HELPER
       # ============================================================
 
       - name: Create WT extraction helper
         shell: bash
         run: |
           set -euo pipefail
+
+          echo
+          echo "=============================================="
+          echo "CREATE WT EXTRACTION HELPER"
+          echo "=============================================="
 
           cat > "$WORK_DIR/extract-wt.js" <<'NODE'
           const fs = require("fs");
@@ -314,7 +292,15 @@ jobs:
           const outputFile = process.argv[3];
 
           if (!scriptFile || !outputFile) {
-            throw new Error("Usage: node extract-wt.js <script> <output>");
+            throw new Error(
+              "Usage: node extract-wt.js <script> <output>"
+            );
+          }
+
+          if (!fs.existsSync(scriptFile)) {
+            throw new Error(
+              "WT script does not exist: " + scriptFile
+            );
           }
 
           const script = fs.readFileSync(scriptFile, "utf8");
@@ -372,20 +358,14 @@ jobs:
           );
 
           if (typeof context.generateWT !== "function") {
-            throw new Error("generateWT function was not found.");
+            throw new Error(
+              "generateWT function was not found."
+            );
           }
 
-          /*
-           * The Gofile website generates the Website Token by hashing
-           * a string containing:
-           *
-           * userAgent::language::accountToken::timeWindow::secret
-           *
-           * We intercept the SHA256 input so the current secret can
-           * be recovered without hardcoding an old Gofile secret.
-           */
           context._sha256 = (input) => {
             rawHashInput = String(input);
+
             return "0".repeat(64);
           };
 
@@ -398,7 +378,9 @@ jobs:
           );
 
           if (!rawHashInput) {
-            throw new Error("Gofile WT hash input was not captured.");
+            throw new Error(
+              "Gofile WT hash input was not captured."
+            );
           }
 
           const expectedPrefix =
@@ -406,7 +388,8 @@ jobs:
 
           if (!rawHashInput.startsWith(expectedPrefix)) {
             throw new Error(
-              "Unexpected Gofile WT hash format:\n" + rawHashInput
+              "Unexpected Gofile WT hash format:\n" +
+              rawHashInput
             );
           }
 
@@ -417,25 +400,73 @@ jobs:
 
           if (parts.length < 2) {
             throw new Error(
-              "Could not extract WT secret from hash input."
+              "Could not extract WT secret."
             );
           }
 
-          /*
-           * The last component is the dynamic secret.
-           */
-          const secret = parts[parts.length - 1].trim();
+          const secret =
+            parts[parts.length - 1].trim();
 
           if (!secret) {
-            throw new Error("Extracted Gofile WT secret is empty.");
+            throw new Error(
+              "Extracted WT secret is empty."
+            );
           }
 
-          fs.writeFileSync(outputFile, secret + "\n");
+          fs.writeFileSync(
+            outputFile,
+            secret + "\n"
+          );
 
-          console.log("Gofile WT secret extracted.");
+          console.log(
+            "Gofile WT secret extracted successfully."
+          );
           NODE
 
-          echo "WT helper created."
+          chmod 700 "$WORK_DIR/extract-wt.js"
+
+          echo "WT extraction helper created."
+
+
+      # ============================================================
+      # EXTRACT DYNAMIC GOFILE WT SECRET
+      # ============================================================
+
+      - name: Extract Gofile Website Token secret
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "=============================================="
+          echo "EXTRACT GOFILE WEBSITE TOKEN SECRET"
+          echo "=============================================="
+
+          WT_SECRET_FILE="$WORK_DIR/wt-secret"
+
+          rm -f "$WT_SECRET_FILE"
+
+          node \
+            "$WORK_DIR/extract-wt.js" \
+            "$WORK_DIR/wt.js" \
+            "$WT_SECRET_FILE"
+
+          if [[ ! -s "$WT_SECRET_FILE" ]]; then
+            echo "ERROR: WT secret extraction failed."
+            exit 1
+          fi
+
+          GOFILE_WT_SECRET="$(tr -d '\r\n' < "$WT_SECRET_FILE")"
+
+          if [[ -z "$GOFILE_WT_SECRET" ]]; then
+            echo "ERROR: WT secret is empty."
+            exit 1
+          fi
+
+          echo "GOFILE_WT_SECRET=$GOFILE_WT_SECRET" >> "$GITHUB_ENV"
+
+          echo
+          echo "Gofile Website Token secret extracted successfully."
 
 
       # ============================================================
@@ -454,44 +485,55 @@ jobs:
 
           TIME_WINDOW="$(( $(date +%s) / 14400 ))"
 
-          echo "Time window: $TIME_WINDOW"
-
           INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
 
-          WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
+          WT="$(
+            printf '%s' "$INPUT" |
+            sha256sum |
+            awk '{print $1}'
+          )"
 
           RESPONSE="$WORK_DIR/account.json"
 
-          HTTP_STATUS="$(curl \
-            --silent \
-            --show-error \
-            --location \
-            --compressed \
-            --output "$RESPONSE" \
-            --write-out "%{http_code}" \
-            --connect-timeout 30 \
-            --max-time 60 \
-            -A "$GOFILE_USER_AGENT" \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/json" \
-            -H "X-Website-Token: $WT" \
-            -H "X-BL: $GOFILE_LANGUAGE" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: https://gofile.io/" \
-            -X POST \
-            "https://api.gofile.io/accounts")
+          rm -f "$RESPONSE"
+
+          HTTP_STATUS="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --compressed \
+              --output "$RESPONSE" \
+              --write-out "%{http_code}" \
+              --connect-timeout 30 \
+              --max-time 60 \
+              -A "$GOFILE_USER_AGENT" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -H "X-Website-Token: $WT" \
+              -H "X-BL: $GOFILE_LANGUAGE" \
+              -H "Origin: https://gofile.io" \
+              -H "Referer: https://gofile.io/" \
+              -X POST \
+              "https://api.gofile.io/accounts"
+          )"
 
           echo "HTTP status: $HTTP_STATUS"
 
           if [[ "$HTTP_STATUS" != "200" ]]; then
+            echo
             echo "ERROR: Gofile guest account creation failed."
-            cat "$RESPONSE"
+            echo
+            cat "$RESPONSE" || true
             exit 1
           fi
 
-          GOFILE_TOKEN="$(jq -r '.data.token // empty' "$RESPONSE")"
+          GOFILE_TOKEN="$(
+            jq -r '.data.token // empty' "$RESPONSE"
+          )"
 
-          if [[ -z "$GOFILE_TOKEN" || "$GOFILE_TOKEN" == "null" ]]; then
+          if [[ -z "$GOFILE_TOKEN" ]]; then
+            echo
             echo "ERROR: Gofile account token was not returned."
             cat "$RESPONSE"
             exit 1
@@ -499,6 +541,7 @@ jobs:
 
           echo "GOFILE_TOKEN=$GOFILE_TOKEN" >> "$GITHUB_ENV"
 
+          echo
           echo "Gofile guest account created successfully."
 
 
@@ -518,6 +561,8 @@ jobs:
 
           RESPONSE="$WORK_DIR/content.json"
 
+          rm -f "$RESPONSE"
+
           SUCCESS=0
 
           CURRENT_WINDOW="$(( $(date +%s) / 14400 ))"
@@ -531,35 +576,43 @@ jobs:
 
             INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::${GOFILE_TOKEN}::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
 
-            WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
+            WT="$(
+              printf '%s' "$INPUT" |
+              sha256sum |
+              awk '{print $1}'
+            )"
 
-            HTTP_STATUS="$(curl \
-              --silent \
-              --show-error \
-              --location \
-              --compressed \
-              --output "$RESPONSE" \
-              --write-out "%{http_code}" \
-              --connect-timeout 30 \
-              --max-time 90 \
-              -A "$GOFILE_USER_AGENT" \
-              -H "Accept: application/json" \
-              -H "Authorization: Bearer $GOFILE_TOKEN" \
-              -H "X-Website-Token: $WT" \
-              -H "X-BL: $GOFILE_LANGUAGE" \
-              -H "Origin: https://gofile.io" \
-              -H "Referer: https://gofile.io/" \
-              -G \
-              --data-urlencode "contentFilter=" \
-              --data-urlencode "page=1" \
-              --data-urlencode "pageSize=1000" \
-              --data-urlencode "sortField=name" \
-              --data-urlencode "sortDirection=1" \
-              "https://api.gofile.io/contents/${GOFILE_ID}")
+            HTTP_STATUS="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --compressed \
+                --output "$RESPONSE" \
+                --write-out "%{http_code}" \
+                --connect-timeout 30 \
+                --max-time 90 \
+                -A "$GOFILE_USER_AGENT" \
+                -H "Accept: application/json" \
+                -H "Authorization: Bearer $GOFILE_TOKEN" \
+                -H "X-Website-Token: $WT" \
+                -H "X-BL: $GOFILE_LANGUAGE" \
+                -H "Origin: https://gofile.io" \
+                -H "Referer: https://gofile.io/" \
+                -G \
+                --data-urlencode "contentFilter=" \
+                --data-urlencode "page=1" \
+                --data-urlencode "pageSize=1000" \
+                --data-urlencode "sortField=name" \
+                --data-urlencode "sortDirection=1" \
+                "https://api.gofile.io/contents/${GOFILE_ID}"
+            )"
 
             echo "HTTP status: $HTTP_STATUS"
 
-            if [[ "$HTTP_STATUS" == "200" ]] && jq -e '.status == "ok"' "$RESPONSE" >/dev/null 2>&1; then
+            if [[ "$HTTP_STATUS" == "200" ]] &&
+               jq -e '.status == "ok"' "$RESPONSE" >/dev/null 2>&1
+            then
               SUCCESS=1
               break
             fi
@@ -569,6 +622,7 @@ jobs:
           if [[ "$SUCCESS" != "1" ]]; then
             echo
             echo "ERROR: Gofile content request failed."
+            echo
 
             if [[ -f "$RESPONSE" ]]; then
               head -c 5000 "$RESPONSE" || true
@@ -583,7 +637,7 @@ jobs:
 
 
       # ============================================================
-      # EXTRACT ACTUAL FILE
+      # EXTRACT ACTUAL FILE INFORMATION
       # ============================================================
 
       - name: Extract Gofile file information
@@ -595,10 +649,12 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "EXTRACT GOFILE FILE"
+          echo "EXTRACT GOFILE FILE INFORMATION"
           echo "=============================================="
 
-          DATA_TYPE="$(jq -r '.data.type // empty' "$RESPONSE")"
+          DATA_TYPE="$(
+            jq -r '.data.type // empty' "$RESPONSE"
+          )"
 
           DOWNLOAD_URL=""
           FILE_NAME=""
@@ -606,61 +662,101 @@ jobs:
 
           if [[ "$DATA_TYPE" == "file" ]]; then
 
-            DOWNLOAD_URL="$(jq -r '.data.link // empty' "$RESPONSE")"
-            FILE_NAME="$(jq -r '.data.name // empty' "$RESPONSE")"
-            FILE_ID="$(jq -r '.data.id // empty' "$RESPONSE")"
+            DOWNLOAD_URL="$(
+              jq -r '.data.link // empty' "$RESPONSE"
+            )"
+
+            FILE_NAME="$(
+              jq -r '.data.name // empty' "$RESPONSE"
+            )"
+
+            FILE_ID="$(
+              jq -r '.data.id // empty' "$RESPONSE"
+            )"
 
           else
 
-            CHILD_COUNT="$(jq '
-              if (.data.children | type) == "object"
-              then (.data.children | length)
-              elif (.data.children | type) == "array"
-              then (.data.children | length)
-              else 0
-              end
-            ' "$RESPONSE")"
+            CHILD_TYPE="$(
+              jq -r '.data.children | type' "$RESPONSE"
+            )"
 
-            echo "Children found: $CHILD_COUNT"
+            if [[ "$CHILD_TYPE" == "object" ]]; then
 
-            if [[ "$CHILD_COUNT" != "1" ]]; then
-              echo
-              echo "ERROR: Expected exactly one file."
-              echo "The supplied Gofile link must point to a single-file share."
-              exit 1
-            fi
+              CHILD_COUNT="$(
+                jq '.data.children | length' "$RESPONSE"
+              )"
 
-            if jq -e '.data.children | type == "object"' "$RESPONSE" >/dev/null; then
-              CHILD="$(jq -c '.data.children | to_entries[0].value' "$RESPONSE")"
+              if [[ "$CHILD_COUNT" != "1" ]]; then
+                echo "ERROR: Expected exactly one file."
+                echo "Children found: $CHILD_COUNT"
+                exit 1
+              fi
+
+              CHILD="$(
+                jq -c '.data.children | to_entries[0].value' "$RESPONSE"
+              )"
+
+            elif [[ "$CHILD_TYPE" == "array" ]]; then
+
+              CHILD_COUNT="$(
+                jq '.data.children | length' "$RESPONSE"
+              )"
+
+              if [[ "$CHILD_COUNT" != "1" ]]; then
+                echo "ERROR: Expected exactly one file."
+                echo "Children found: $CHILD_COUNT"
+                exit 1
+              fi
+
+              CHILD="$(
+                jq -c '.data.children[0]' "$RESPONSE"
+              )"
+
             else
-              CHILD="$(jq -c '.data.children[0]' "$RESPONSE")"
+
+              echo "ERROR: Unknown Gofile content structure."
+              exit 1
+
             fi
 
-            DOWNLOAD_URL="$(echo "$CHILD" | jq -r '.link // empty')"
-            FILE_NAME="$(echo "$CHILD" | jq -r '.name // empty')"
-            FILE_ID="$(echo "$CHILD" | jq -r '.id // empty')"
+            DOWNLOAD_URL="$(
+              echo "$CHILD" |
+              jq -r '.link // empty'
+            )"
+
+            FILE_NAME="$(
+              echo "$CHILD" |
+              jq -r '.name // empty'
+            )"
+
+            FILE_ID="$(
+              echo "$CHILD" |
+              jq -r '.id // empty'
+            )"
 
           fi
 
           if [[ -z "$DOWNLOAD_URL" ]]; then
-            echo "ERROR: Could not find download URL."
+            echo "ERROR: Download URL not found."
             exit 1
           fi
 
           if [[ -z "$FILE_NAME" ]]; then
-            echo "ERROR: Could not determine filename."
+            echo "ERROR: Filename not found."
             exit 1
           fi
 
           if [[ -z "$FILE_ID" ]]; then
-            echo "ERROR: Could not determine file ID."
+            echo "ERROR: File ID not found."
             exit 1
           fi
 
-          # Remove dangerous path components.
           FILE_NAME="$(basename "$FILE_NAME")"
 
-          if [[ "$FILE_NAME" == "." || "$FILE_NAME" == ".." || -z "$FILE_NAME" ]]; then
+          if [[ "$FILE_NAME" == "." ||
+                "$FILE_NAME" == ".." ||
+                -z "$FILE_NAME" ]]
+          then
             echo "ERROR: Invalid filename."
             exit 1
           fi
@@ -670,19 +766,23 @@ jobs:
           echo "FILE_ID=$FILE_ID" >> "$GITHUB_ENV"
 
           echo
-          echo "File ID   : $FILE_ID"
-          echo "Filename  : $FILE_NAME"
-          echo "Download URL detected successfully."
+          echo "File ID  : $FILE_ID"
+          echo "Filename : $FILE_NAME"
 
 
       # ============================================================
-      # PREPARE GOFILE COOKIE
+      # CREATE GOFILE COOKIE
       # ============================================================
 
       - name: Prepare Gofile authentication cookie
         shell: bash
         run: |
           set -euo pipefail
+
+          echo
+          echo "=============================================="
+          echo "PREPARE GOFILE COOKIE"
+          echo "=============================================="
 
           COOKIE_JAR="$WORK_DIR/gofile.cookies"
 
@@ -697,7 +797,7 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD ACTUAL GOFILE FILE
+      # DOWNLOAD ACTUAL FILE
       # ============================================================
 
       - name: Download file from Gofile
@@ -713,9 +813,13 @@ jobs:
           echo "DOWNLOAD FILE FROM GOFILE"
           echo "=============================================="
 
-          echo "Filename: $FILE_NAME"
+          echo "Filename:"
+          echo "$FILE_NAME"
+
           echo
           echo "Starting download..."
+
+          rm -f "$OUTPUT"
 
           curl \
             --fail \
@@ -742,7 +846,9 @@ jobs:
             exit 1
           fi
 
-          FILE_SIZE="$(stat -c '%s' "$OUTPUT")"
+          FILE_SIZE="$(
+            stat -c '%s' "$OUTPUT"
+          )"
 
           echo
           echo "Downloaded size: $FILE_SIZE bytes"
@@ -755,36 +861,43 @@ jobs:
             file "$OUTPUT" || true
             echo
             echo "First bytes:"
-            head -c 500 "$OUTPUT" | cat -v || true
+            head -c 1000 "$OUTPUT" |
+              cat -v || true
             exit 1
           fi
 
-          FILE_TYPE="$(file -b "$OUTPUT")"
+          FILE_TYPE="$(
+            file -b "$OUTPUT"
+          )"
 
           echo "File type: $FILE_TYPE"
 
           case "$FILE_TYPE" in
-            *HTML*|*HTML\ document*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
+            *HTML*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
               echo
-              echo "ERROR: Gofile returned a webpage/text response instead of the ROM."
+              echo "ERROR: Gofile returned text/HTML instead of the ROM."
               echo
-              head -c 1000 "$OUTPUT" | cat -v || true
+              head -c 1000 "$OUTPUT" |
+                cat -v || true
               exit 1
               ;;
           esac
 
-          SHA256="$(sha256sum "$OUTPUT" | awk '{print $1}')"
+          FILE_SHA256="$(
+            sha256sum "$OUTPUT" |
+            awk '{print $1}'
+          )"
 
           echo "FILE_SIZE=$FILE_SIZE" >> "$GITHUB_ENV"
-          echo "FILE_SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "FILE_SHA256=$FILE_SHA256" >> "$GITHUB_ENV"
 
           echo
           echo "Download completed successfully."
-          echo "SHA256: $SHA256"
+          echo "SHA256: $FILE_SHA256"
 
 
       # ============================================================
-      # DISPLAY DOWNLOADED FILE
+      # VERIFY DOWNLOADED FILE
       # ============================================================
 
       - name: Verify downloaded ROM
@@ -796,13 +909,18 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "DOWNLOADED FILE"
+          echo "VERIFY DOWNLOADED ROM"
           echo "=============================================="
+
+          if [[ ! -f "$FILE" ]]; then
+            echo "ERROR: ROM file is missing."
+            exit 1
+          fi
 
           ls -lh "$FILE"
 
           echo
-          echo "File:"
+          echo "File type:"
           file "$FILE"
 
           echo
@@ -815,7 +933,7 @@ jobs:
 
 
       # ============================================================
-      # SOURCEFORGE SSH CONFIGURATION
+      # CONFIGURE SOURCEFORGE SSH
       # ============================================================
 
       - name: Configure SourceForge SSH key
@@ -842,6 +960,7 @@ jobs:
           fi
 
           mkdir -p "$HOME/.ssh"
+
           chmod 700 "$HOME/.ssh"
 
           printf '%s\n' "$SOURCEFORGE_SSH_KEY" \
@@ -850,7 +969,7 @@ jobs:
           chmod 600 "$HOME/.ssh/sourceforge_mistos"
 
           echo
-          echo "Validating private SSH key..."
+          echo "Validating private key..."
 
           ssh-keygen \
             -y \
@@ -859,7 +978,7 @@ jobs:
 
           chmod 644 "$HOME/.ssh/sourceforge_mistos.pub"
 
-          echo "Private key is valid."
+          echo "Private SSH key is valid."
 
           cat > "$HOME/.ssh/config" <<EOF
           Host sourceforge-frs
@@ -879,11 +998,11 @@ jobs:
           chmod 600 "$HOME/.ssh/config"
 
           echo
-          echo "SourceForge SSH configuration created."
+          echo "SourceForge SSH configuration ready."
 
 
       # ============================================================
-      # TEST SOURCEFORGE AUTHENTICATION
+      # TEST SOURCEFORGE SSH
       # ============================================================
 
       - name: Test SourceForge SSH authentication
@@ -905,27 +1024,32 @@ jobs:
             sourceforge-frs \
             "echo SOURCEFORGE_AUTH_OK"
           then
+
             echo
             echo "SourceForge SSH authentication successful."
+
           else
+
             echo
             echo "=============================================="
             echo "SOURCEFORGE AUTHENTICATION FAILED"
             echo "=============================================="
             echo
-            echo "Check:"
+            echo "Check the following:"
+            echo
             echo "1. SOURCEFORGE_USER is correct."
             echo "2. SOURCEFORGE_SSH_KEY contains the private key."
-            echo "3. The matching public key is added to SourceForge."
-            echo "4. The SourceForge account has developer access to project-mistos."
-            echo "5. The private key has no passphrase."
+            echo "3. Matching public key is added to SourceForge."
+            echo "4. SourceForge account has developer access."
+            echo "5. Private key does not require a passphrase."
             echo
+
             exit 1
           fi
 
 
       # ============================================================
-      # CREATE SOURCEFORGE DEVICE DIRECTORY
+      # PREPARE SOURCEFORGE DEVICE DIRECTORY
       # ============================================================
 
       - name: Prepare SourceForge device directory
@@ -937,10 +1061,10 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "SOURCEFORGE DIRECTORY"
+          echo "SOURCEFORGE DEVICE DIRECTORY"
           echo "=============================================="
 
-          echo "Remote base:"
+          echo "Base:"
           echo "$SOURCEFORGE_BASE"
 
           echo
@@ -961,7 +1085,7 @@ jobs:
 
 
       # ============================================================
-      # UPLOAD TO SOURCEFORGE
+      # UPLOAD WITH RSYNC
       # ============================================================
 
       - name: Upload ROM to SourceForge
@@ -971,11 +1095,10 @@ jobs:
 
           LOCAL_FILE="$WORK_DIR/$FILE_NAME"
           REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE"
-          REMOTE_FILE="$REMOTE_DIR/$FILE_NAME"
 
           echo
           echo "=============================================="
-          echo "UPLOAD TO SOURCEFORGE"
+          echo "UPLOAD ROM TO SOURCEFORGE"
           echo "=============================================="
 
           echo "Local file:"
@@ -986,11 +1109,7 @@ jobs:
           echo "$REMOTE_DIR"
 
           echo
-          echo "Remote file:"
-          echo "$REMOTE_FILE"
-
-          echo
-          echo "Starting rsync upload..."
+          echo "Starting upload..."
           echo
 
           rsync \
@@ -1003,11 +1122,11 @@ jobs:
             "sourceforge-frs:$REMOTE_DIR/"
 
           echo
-          echo "SourceForge upload completed."
+          echo "Upload completed."
 
 
       # ============================================================
-      # VERIFY SOURCEFORGE UPLOAD
+      # VERIFY REMOTE FILE
       # ============================================================
 
       - name: Verify SourceForge upload
@@ -1038,7 +1157,7 @@ jobs:
 
           if [[ "$REMOTE_SIZE" != "$FILE_SIZE" ]]; then
             echo
-            echo "ERROR: Remote file size does not match local file."
+            echo "ERROR: File size mismatch."
             exit 1
           fi
 
@@ -1061,15 +1180,15 @@ jobs:
 
           echo
           echo "=============================================="
-          echo "UPLOAD VERIFIED SUCCESSFULLY"
+          echo "UPLOAD VERIFIED"
           echo "=============================================="
 
 
       # ============================================================
-      # PRINT FINAL SOURCEFORGE URL
+      # FINAL RESULT
       # ============================================================
 
-      - name: Show SourceForge download URL
+      - name: Show final result
         shell: bash
         run: |
           set -euo pipefail
@@ -1078,7 +1197,7 @@ jobs:
 
           echo
           echo "============================================================"
-          echo "                    MISTOS UPLOAD COMPLETE"
+          echo "                 MISTOS UPLOAD COMPLETE"
           echo "============================================================"
           echo
           echo "Device:"
@@ -1093,7 +1212,42 @@ jobs:
           echo "SHA256:"
           echo "  $FILE_SHA256"
           echo
-          echo "SourceForge:"
+          echo "SourceForge URL:"
           echo "  $SOURCEFORGE_URL"
           echo
+          echo "Remote path:"
+          echo "  $SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
+          echo
           echo "============================================================"
+
+
+      # ============================================================
+      # CLEANUP
+      # ============================================================
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          echo
+          echo "=============================================="
+          echo "CLEANUP"
+          echo "=============================================="
+
+          if [[ -n "${WORK_DIR:-}" &&
+                -d "$WORK_DIR" ]]
+          then
+            echo "Removing Gofile files..."
+            rm -rf "$WORK_DIR"
+          fi
+
+          echo "Removing SourceForge SSH files..."
+
+          rm -f "$HOME/.ssh/sourceforge_mistos"
+          rm -f "$HOME/.ssh/sourceforge_mistos.pub"
+          rm -f "$HOME/.ssh/config"
+
+          echo
+          echo "Cleanup completed."
