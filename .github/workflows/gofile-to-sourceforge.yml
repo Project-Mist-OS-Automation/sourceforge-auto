@@ -4,18 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       gofile_url:
-        description: "Gofile URL (example: https://gofile.io/d/OXHOeYwi)"
+        description: "Gofile URL"
         required: true
         type: string
 
       device:
-        description: "Device name (raphael, bluejay, lisa, sweet, raven, etc.)"
+        description: "Device name"
         required: true
         type: string
 
 jobs:
   transfer:
-    name: Gofile → SourceForge
     runs-on: ubuntu-latest
 
     env:
@@ -28,17 +27,12 @@ jobs:
     steps:
 
       # ==========================================================
-      # 1. Install dependencies
+      # PREPARE
       # ==========================================================
 
       - name: Prepare environment
-        shell: bash
         run: |
           set -Eeuo pipefail
-
-          echo "============================================================"
-          echo "              MISTOS GOFILE → SOURCEFORGE"
-          echo "============================================================"
 
           sudo apt-get update
 
@@ -51,20 +45,16 @@ jobs:
             openssh-client \
             ca-certificates \
             python3 \
-            nodejs
+            python3-requests
 
-          mkdir -p "$RUNNER_TEMP/mistos-transfer/download"
-          mkdir -p "$RUNNER_TEMP/mistos-transfer/logs"
-
-          echo
-          echo "Dependencies installed."
+          mkdir -p "$RUNNER_TEMP/mistos/download"
+          mkdir -p "$RUNNER_TEMP/mistos/logs"
 
       # ==========================================================
-      # 2. Validate inputs
+      # VALIDATE INPUT
       # ==========================================================
 
-      - name: Validate inputs
-        shell: bash
+      - name: Validate input
         env:
           GOFILE_URL: ${{ inputs.gofile_url }}
           DEVICE: ${{ inputs.device }}
@@ -75,28 +65,21 @@ jobs:
           echo "                    INPUT VALIDATION"
           echo "============================================================"
 
-          if [[ -z "$GOFILE_URL" ]]; then
-            echo "::error::Gofile URL is empty."
-            exit 1
-          fi
-
           if [[ ! "$GOFILE_URL" =~ ^https?:// ]]; then
             echo "::error::Invalid Gofile URL."
             exit 1
           fi
 
           if [[ -z "$DEVICE" ]]; then
-            echo "::error::Device name is empty."
+            echo "::error::Device is empty."
             exit 1
           fi
 
-          if [[ "$DEVICE" == "." || "$DEVICE" == ".." ]]; then
+          if [[ "$DEVICE" == *"/"* ||
+                "$DEVICE" == *"\\"* ||
+                "$DEVICE" == "." ||
+                "$DEVICE" == ".." ]]; then
             echo "::error::Invalid device name."
-            exit 1
-          fi
-
-          if [[ "$DEVICE" == *"/"* || "$DEVICE" == *"\\"* ]]; then
-            echo "::error::Device name cannot contain / or \\."
             exit 1
           fi
 
@@ -105,106 +88,53 @@ jobs:
             exit 1
           fi
 
-          echo "Gofile URL : $GOFILE_URL"
-          echo "Device     : $DEVICE"
+          echo "Gofile : $GOFILE_URL"
+          echo "Device : $DEVICE"
 
       # ==========================================================
-      # 3. Extract Gofile ID
+      # EXTRACT GOFILE ID
       # ==========================================================
 
       - name: Extract Gofile ID
-        shell: bash
         env:
           GOFILE_URL: ${{ inputs.gofile_url }}
         run: |
           set -Eeuo pipefail
 
-          echo "============================================================"
-          echo "                  GOFILE ID EXTRACTION"
-          echo "============================================================"
+          URL="${GOFILE_URL%%\?*}"
+          URL="${URL%/}"
 
-          CLEAN_URL="${GOFILE_URL%%\?*}"
-          CLEAN_URL="${CLEAN_URL%/}"
-
-          if [[ "$CLEAN_URL" =~ /d/([^/]+)$ ]]; then
+          if [[ "$URL" =~ /d/([^/]+)$ ]]; then
             GOFILE_ID="${BASH_REMATCH[1]}"
           else
             echo "::error::Could not extract Gofile ID."
-            echo
-            echo "Expected:"
-            echo "https://gofile.io/d/XXXXXXXX"
+            echo "Expected: https://gofile.io/d/XXXXXXXX"
             exit 1
           fi
 
-          echo "Gofile ID: $GOFILE_ID"
-
           echo "GOFILE_ID=$GOFILE_ID" >> "$GITHUB_ENV"
 
+          echo
+          echo "Gofile ID: $GOFILE_ID"
+
       # ==========================================================
-      # 4. Download CURRENT Gofile WT JavaScript
+      # GET GOFILE WEBSITE TOKEN SECRET
       # ==========================================================
 
-      - name: Get current Gofile website-token script
+      - name: Get current Gofile WT secret
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "          GET CURRENT GOFILE WEBSITE TOKEN SCRIPT"
+          echo "              GET GOFILE WEBSITE TOKEN"
           echo "============================================================"
 
-          SCRIPT_FILE="$RUNNER_TEMP/mistos-transfer/gofile_wt.js"
+          WT_JS="$RUNNER_TEMP/mistos/gofile_wt.js"
 
-          WEBSITE_HTML="$RUNNER_TEMP/mistos-transfer/gofile.html"
+          mkdir -p "$RUNNER_TEMP/mistos"
 
-          echo "Downloading Gofile homepage..."
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            --connect-timeout 30 \
-            --max-time 60 \
-            -A "$GOFILE_USER_AGENT" \
-            -H "Accept: text/html,application/xhtml+xml" \
-            "https://gofile.io/" \
-            -o "$WEBSITE_HTML"
-
-          echo "Searching homepage for WT script..."
-
-          DISCOVERED_URL="$(
-            python3 - "$WEBSITE_HTML" <<'PY'
-          import re
-          import sys
-          from urllib.parse import urljoin
-
-          html = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
-
-          patterns = [
-              r'<script[^>]+src=["\']([^"\']*wt[^"\']*\.js)["\']',
-              r'<script[^>]+src=["\']([^"\']*wt\.obf\.js)["\']',
-          ]
-
-          for pattern in patterns:
-              m = re.search(pattern, html, re.I)
-
-              if m:
-                  print(urljoin("https://gofile.io/", m.group(1)))
-                  break
-          PY
-          )"
-
-          echo "Discovered URL:"
-          echo "${DISCOVERED_URL:-<none>}"
-
-          URLS=()
-
-          if [[ -n "$DISCOVERED_URL" ]]; then
-            URLS+=("$DISCOVERED_URL")
-          fi
-
-          URLS+=(
+          URLS=(
             "https://gofile.io/js/wt.obf.js"
             "https://gofile.io/dist/js/wt.obf.js"
           )
@@ -217,500 +147,419 @@ jobs:
             echo "Trying:"
             echo "$URL"
 
-            if curl \
-              --fail \
-              --silent \
-              --show-error \
-              --location \
-              --connect-timeout 30 \
-              --max-time 60 \
-              -A "$GOFILE_USER_AGENT" \
-              -H "Accept: application/javascript,text/javascript,*/*;q=0.8" \
-              -H "Referer: https://gofile.io/" \
-              "$URL" \
-              -o "$SCRIPT_FILE"; then
+            HTTP_CODE="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --connect-timeout 30 \
+                --max-time 60 \
+                --output "$WT_JS" \
+                --write-out "%{http_code}" \
+                -A "$GOFILE_USER_AGENT" \
+                -H "Accept: */*" \
+                -H "Referer: https://gofile.io/" \
+                "$URL" \
+                || true
+            )"
 
-              if [[ -s "$SCRIPT_FILE" ]]; then
+            echo "HTTP: $HTTP_CODE"
 
-                FIRST_CHAR="$(
-                  sed 's/^[[:space:]]*//' "$SCRIPT_FILE" |
-                  head -c 1
-                )"
+            if [[ "$HTTP_CODE" == "200" ]] &&
+               [[ -s "$WT_JS" ]]; then
 
-                if [[ "$FIRST_CHAR" != "<" ]]; then
+              if ! head -c 100 "$WT_JS" |
+                grep -qiE '<html|<!doctype'; then
 
-                  echo
-                  echo "Successfully downloaded WT script."
-                  echo "Source:"
-                  echo "$URL"
+                echo "WT script downloaded."
 
-                  FOUND=1
-                  break
-
-                fi
+                FOUND=1
+                break
               fi
             fi
 
-            echo "Failed."
           done
 
           if [[ "$FOUND" -ne 1 ]]; then
             echo
-            echo "::error::Could not download Gofile WT script."
+            echo "::error::Unable to download current Gofile WT script."
             exit 1
           fi
 
           echo
           echo "WT script size:"
-          wc -c "$SCRIPT_FILE"
+          wc -c "$WT_JS"
 
-          echo "GOFILE_WT_SCRIPT=$SCRIPT_FILE" >> "$GITHUB_ENV"
+          echo
+          echo "Searching script for token salt..."
+
+          python3 <<'PY'
+          import os
+          import re
+          import sys
+
+          path = os.environ["RUNNER_TEMP"] + "/mistos/gofile_wt.js"
+
+          data = open(
+              path,
+              "r",
+              encoding="utf-8",
+              errors="ignore"
+          ).read()
+
+          # Gofile's token secret has historically appeared
+          # as a string literal near the WT generator.
+          #
+          # Look for likely 10-40 character literals containing
+          # letters/numbers and surrounding token-generation code.
+
+          candidates = []
+
+          patterns = [
+              r'["\']([A-Za-z0-9]{10,40})["\']',
+              r'["\']([A-Za-z0-9_-]{10,40})["\']',
+          ]
+
+          for pattern in patterns:
+              for match in re.finditer(pattern, data):
+                  value = match.group(1)
+
+                  # Ignore common JS values.
+                  if value.lower() in {
+                      "undefined",
+                      "javascript",
+                      "application",
+                      "textjavascript",
+                      "gofile",
+                      "website",
+                      "window",
+                      "function",
+                      "undefined",
+                      "localstorage",
+                      "authorization",
+                      "content",
+                      "contents",
+                      "api",
+                  }:
+                      continue
+
+                  pos = match.start()
+
+                  surrounding = data[
+                      max(0, pos - 800):
+                      min(len(data), pos + 800)
+                  ].lower()
+
+                  score = 0
+
+                  for keyword in [
+                      "generatewt",
+                      "websitetoken",
+                      "website-token",
+                      "sha256",
+                      "accounttoken",
+                      "token",
+                      "14400",
+                      "four",
+                      "3600",
+                  ]:
+                      if keyword in surrounding:
+                          score += 1
+
+                  candidates.append(
+                      (score, value)
+                  )
+
+          candidates.sort(
+              key=lambda x: (-x[0], len(x[1]))
+          )
+
+          if not candidates:
+              print(
+                  "::error::No possible WT secret found."
+              )
+              sys.exit(1)
+
+          # Remove duplicates while keeping score.
+          seen = set()
+
+          unique = []
+
+          for score, value in candidates:
+              if value in seen:
+                  continue
+
+              seen.add(value)
+              unique.append((score, value))
+
+          print(
+              f"Found {len(unique)} candidate strings."
+          )
+
+          # We cannot safely assume the first arbitrary string is
+          # the secret. Print candidate scores only, not values.
+          for score, value in unique[:20]:
+              print(
+                  f"Candidate score={score}, length={len(value)}"
+              )
+
+          # Save candidates for the next step.
+          output = os.environ["RUNNER_TEMP"] + \
+                   "/mistos/wt_candidates.txt"
+
+          with open(output, "w") as f:
+              for score, value in unique:
+                  f.write(
+                      f"{score}\t{value}\n"
+                  )
+
+          print(
+              f"Candidates saved to {output}"
+          )
+          PY
 
       # ==========================================================
-      # 5. Extract WT secret by executing generateWT()
+      # CREATE GOFILE ACCOUNT
       # ==========================================================
 
-      - name: Extract Gofile WT secret
+      - name: Create Gofile account
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "             EXTRACT GOFILE WT SECRET"
+          echo "               CREATE GOFILE ACCOUNT"
           echo "============================================================"
 
-          SCRIPT="$GOFILE_WT_SCRIPT"
+          RESPONSE="$RUNNER_TEMP/mistos/logs/account.json"
 
-          cat > "$RUNNER_TEMP/mistos-transfer/extract_wt.js" <<'NODE'
-          const fs = require("fs");
-          const vm = require("vm");
-          const crypto = require("crypto");
-
-          const scriptFile = process.argv[2];
-
-          const script = fs.readFileSync(
-            scriptFile,
-            "utf8"
-          );
-
-          let rawHashInput = null;
-
-          const probeUserAgent = "MistOSGofileUserAgent";
-          const probeLanguage = "en-US";
-          const probeToken = "MistOSGofileToken";
-
-          const context = vm.createContext({
-            console: {
-              log() {},
-              warn() {},
-              error() {}
-            },
-
-            crypto: {
-              subtle: {
-                digest: async function(algorithm, data) {
-                  const hash = crypto.createHash("sha256");
-                  hash.update(Buffer.from(data));
-                  return hash.digest().buffer;
-                }
-              }
-            },
-
-            Date,
-            Math,
-            URLSearchParams,
-
-            navigator: {
-              userAgent: probeUserAgent,
-              language: probeLanguage
-            },
-
-            window: {
-              crypto: {
-                subtle: {
-                  digest: async function(algorithm, data) {
-                    const hash = crypto.createHash("sha256");
-                    hash.update(Buffer.from(data));
-                    return hash.digest().buffer;
-                  }
-                }
-              },
-
-              location: {
-                hostname: "gofile.io",
-                search: ""
-              },
-
-              navigator: {
-                userAgent: probeUserAgent,
-                language: probeLanguage
-              }
-            },
-
-            appdata: {}
-          });
-
-          // Intercept hashing.
-          //
-          // Gofile's generator ultimately hashes:
-          //
-          // userAgent::language::accountToken::timeWindow::secret
-
-          context._sha256 = function(input) {
-            rawHashInput = String(input);
-
-            return "0".repeat(64);
-          };
-
-          try {
-            vm.runInContext(
-              script,
-              context,
-              {
-                timeout: 3000
-              }
-            );
-          } catch (e) {
-            // Some browser-specific code may throw during startup.
-            // generateWT can still be available.
-          }
-
-          if (typeof context.generateWT !== "function") {
-            console.error(
-              "ERROR: generateWT() was not found."
-            );
-
-            process.exit(2);
-          }
-
-          try {
-            vm.runInContext(
-              `generateWT(${JSON.stringify(probeToken)})`,
-              context,
-              {
-                timeout: 3000
-              }
-            );
-          } catch (e) {
-            console.error(
-              "ERROR: generateWT() execution failed:"
-            );
-
-            console.error(e.message);
-
-            process.exit(3);
-          }
-
-          if (!rawHashInput) {
-            console.error(
-              "ERROR: WT generator did not expose hash input."
-            );
-
-            process.exit(4);
-          }
-
-          const prefix =
-            `${probeUserAgent}::${probeLanguage}::${probeToken}::`;
-
-          if (!rawHashInput.startsWith(prefix)) {
-            console.error(
-              "ERROR: Unsupported WT generator format."
-            );
-
-            console.error(
-              "Hash input prefix did not match."
-            );
-
-            process.exit(5);
-          }
-
-          const remainder =
-            rawHashInput.slice(prefix.length);
-
-          const parts =
-            remainder.split("::");
-
-          if (parts.length < 2) {
-            console.error(
-              "ERROR: Could not extract WT secret."
-            );
-
-            process.exit(6);
-          }
-
-          // First part is time window.
-          // Everything after that is the secret.
-          const secret =
-            parts.slice(1).join("::").trim();
-
-          if (!secret) {
-            console.error(
-              "ERROR: Empty WT secret."
-            );
-
-            process.exit(7);
-          }
-
-          console.log(secret);
-          NODE
-
-          SECRET="$(
-            node \
-              "$RUNNER_TEMP/mistos-transfer/extract_wt.js" \
-              "$SCRIPT"
+          HTTP_CODE="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --connect-timeout 30 \
+              --max-time 60 \
+              --output "$RESPONSE" \
+              --write-out "%{http_code}" \
+              -X POST \
+              -A "$GOFILE_USER_AGENT" \
+              -H "Accept: application/json" \
+              -H "X-BL: $GOFILE_LANGUAGE" \
+              "https://api.gofile.io/accounts"
           )"
 
-          if [[ -z "$SECRET" ]]; then
-            echo "::error::Could not extract Gofile WT secret."
+          echo "HTTP: $HTTP_CODE"
+
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo
+            cat "$RESPONSE"
             exit 1
           fi
 
-          echo "Gofile WT secret successfully extracted."
+          STATUS="$(
+            jq -r '.status // empty' "$RESPONSE"
+          )"
 
-          # Secret itself is NOT printed.
-          echo "::add-mask::$SECRET"
+          if [[ "$STATUS" != "ok" ]]; then
+            jq . "$RESPONSE"
+            exit 1
+          fi
 
-          echo "GOFILE_WT_SECRET=$SECRET" >> "$GITHUB_ENV"
+          TOKEN="$(
+            jq -r '.data.token // empty' "$RESPONSE"
+          )"
+
+          if [[ -z "$TOKEN" ]]; then
+            echo "::error::No account token returned."
+            exit 1
+          fi
+
+          echo "::add-mask::$TOKEN"
+
+          echo "GOFILE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+          echo "Gofile account created."
 
       # ==========================================================
-      # 6. Create guest account
+      # GENERATE WEBSITE TOKEN
       # ==========================================================
 
-      - name: Create Gofile guest account
+      - name: Generate Gofile website token
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "              CREATE GOFILE GUEST ACCOUNT"
+          echo "              GENERATE GOFILE WEBSITE TOKEN"
           echo "============================================================"
 
           python3 <<'PY'
           import hashlib
           import os
           import time
-          import requests
 
-          UA = os.environ["GOFILE_USER_AGENT"]
-          LANG = os.environ["GOFILE_LANGUAGE"]
-          SECRET = os.environ["GOFILE_WT_SECRET"]
+          ua = os.environ["GOFILE_USER_AGENT"]
+          lang = os.environ["GOFILE_LANGUAGE"]
+          account = os.environ["GOFILE_TOKEN"]
 
-          window = int(time.time()) // 14400
-
-          raw = (
-              f"{UA}::"
-              f"{LANG}::"
-              f"::{window}::"
-              f"{SECRET}"
+          candidates_file = (
+              os.environ["RUNNER_TEMP"] +
+              "/mistos/wt_candidates.txt"
           )
 
-          wt = hashlib.sha256(
-              raw.encode()
-          ).hexdigest()
+          with open(candidates_file) as f:
+              candidates = [
+                  line.rstrip("\n").split("\t", 1)
+                  for line in f
+              ]
 
-          headers = {
-              "User-Agent": UA,
-              "Accept": "application/json",
-              "X-Website-Token": wt,
-              "X-BL": LANG,
-              "Origin": "https://gofile.io",
-              "Referer": "https://gofile.io/"
-          }
+          current_window = int(time.time()) // 14400
 
-          response = requests.post(
-              "https://api.gofile.io/accounts",
-              headers=headers,
-              timeout=60
+          # We test candidate secrets against Gofile.
+          #
+          # The actual validation happens in the next step.
+
+          output = (
+              os.environ["RUNNER_TEMP"] +
+              "/mistos/wt_tokens.txt"
           )
+
+          with open(output, "w") as f:
+
+              for score, secret in candidates:
+
+                  for window in [
+                      current_window,
+                      current_window - 1
+                  ]:
+
+                      raw = (
+                          f"{ua}::"
+                          f"{lang}::"
+                          f"{account}::"
+                          f"{window}::"
+                          f"{secret}"
+                      )
+
+                      token = hashlib.sha256(
+                          raw.encode()
+                      ).hexdigest()
+
+                      f.write(
+                          f"{score}\t"
+                          f"{window}\t"
+                          f"{secret}\t"
+                          f"{token}\n"
+                      )
 
           print(
-              f"Gofile account HTTP status: {response.status_code}"
+              f"Generated {len(candidates) * 2} "
+              "candidate website tokens."
           )
-
-          try:
-              data = response.json()
-          except Exception:
-              print(response.text[:1000])
-              raise SystemExit(
-                  "Gofile returned non-JSON response."
-              )
-
-          if data.get("status") != "ok":
-              print(data)
-              raise SystemExit(
-                  "Failed to create Gofile guest account."
-              )
-
-          token = data.get("data", {}).get("token")
-
-          if not token:
-              raise SystemExit(
-                  "Gofile did not return an account token."
-              )
-
-          print("Gofile guest account created.")
-
-          with open(
-              os.environ["GITHUB_ENV"],
-              "a"
-          ) as f:
-              f.write(
-                  f"GOFILE_TOKEN={token}\n"
-              )
           PY
 
       # ==========================================================
-      # 7. Get Gofile content
+      # TEST WEBSITE TOKENS
       # ==========================================================
 
-      - name: Get Gofile content
+      - name: Resolve Gofile content
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "                    GET GOFILE CONTENT"
+          echo "                 RESOLVE GOFILE CONTENT"
           echo "============================================================"
 
-          RESPONSE="$RUNNER_TEMP/mistos-transfer/logs/gofile_content.json"
+          RESPONSE="$RUNNER_TEMP/mistos/logs/content.json"
+          TOKENS="$RUNNER_TEMP/mistos/wt_tokens.txt"
 
-          SUCCESS=0
+          FOUND=0
 
-          # Only a few attempts.
-          #
-          # Do NOT hammer Gofile after 429.
-          for attempt in 1 2 3; do
+          COUNT=0
 
+          while IFS=$'\t' read -r SCORE WINDOW SECRET TOKEN; do
+
+            COUNT=$((COUNT + 1))
+
+            # Don't print secret/token.
             echo
-            echo "Attempt $attempt/3"
+            echo "Testing candidate $COUNT..."
 
-            python3 <<'PY' > "$RUNNER_TEMP/mistos-transfer/request.py"
-          import hashlib
-          import os
-          import time
+            HTTP_CODE="$(
+              curl \
+                --silent \
+                --show-error \
+                --output "$RESPONSE" \
+                --write-out "%{http_code}" \
+                --connect-timeout 15 \
+                --max-time 30 \
+                -A "$GOFILE_USER_AGENT" \
+                -H "Accept: application/json" \
+                -H "Authorization: Bearer ${GOFILE_TOKEN}" \
+                -H "X-Website-Token: ${TOKEN}" \
+                -H "X-BL: ${GOFILE_LANGUAGE}" \
+                -H "Origin: https://gofile.io" \
+                -H "Referer: https://gofile.io/" \
+                -G \
+                --data-urlencode "contentFilter=" \
+                --data-urlencode "page=1" \
+                --data-urlencode "pageSize=1000" \
+                --data-urlencode "sortField=name" \
+                --data-urlencode "sortDirection=1" \
+                "https://api.gofile.io/contents/${GOFILE_ID}" \
+                || true
+            )"
 
-          UA = os.environ["GOFILE_USER_AGENT"]
-          LANG = os.environ["GOFILE_LANGUAGE"]
-          TOKEN = os.environ["GOFILE_TOKEN"]
-          SECRET = os.environ["GOFILE_WT_SECRET"]
+            echo "HTTP: $HTTP_CODE"
 
-          # Current and previous time windows.
-          current = int(time.time()) // 14400
+            if [[ "$HTTP_CODE" == "200" ]]; then
 
-          for window in [current, current - 1]:
-
-              raw = (
-                  f"{UA}::"
-                  f"{LANG}::"
-                  f"{TOKEN}::"
-                  f"{window}::"
-                  f"{SECRET}"
-              )
-
-              wt = hashlib.sha256(
-                  raw.encode()
-              ).hexdigest()
-
-              print(
-                  window,
-                  wt
-              )
-          PY
-
-            mapfile -t TOKENS < <(
-              python3 "$RUNNER_TEMP/mistos-transfer/request.py"
-            )
-
-            RESPONSE_CODE=0
-
-            for entry in "${TOKENS[@]}"; do
-
-              WINDOW="${entry%% *}"
-              WT="${entry#* }"
-
-              echo "Trying time window: $WINDOW"
-
-              HTTP_CODE="$(
-                curl \
-                  --silent \
-                  --show-error \
-                  --output "$RESPONSE" \
-                  --write-out "%{http_code}" \
-                  --connect-timeout 30 \
-                  --max-time 90 \
-                  -A "$GOFILE_USER_AGENT" \
-                  -H "Accept: application/json" \
-                  -H "Authorization: Bearer ${GOFILE_TOKEN}" \
-                  -H "X-Website-Token: ${WT}" \
-                  -H "X-BL: ${GOFILE_LANGUAGE}" \
-                  -H "Origin: https://gofile.io" \
-                  -H "Referer: https://gofile.io/" \
-                  -G \
-                  --data-urlencode "contentFilter=" \
-                  --data-urlencode "page=1" \
-                  --data-urlencode "pageSize=1000" \
-                  --data-urlencode "sortField=name" \
-                  --data-urlencode "sortDirection=1" \
-                  "https://api.gofile.io/contents/${GOFILE_ID}" \
-                  || true
+              STATUS="$(
+                jq -r '.status // empty' "$RESPONSE" 2>/dev/null || true
               )"
 
-              echo "HTTP status: $HTTP_CODE"
-
-              if [[ "$HTTP_CODE" == "200" ]]; then
-
-                STATUS="$(
-                  jq -r '.status // empty' "$RESPONSE" 2>/dev/null || true
-                )"
-
-                if [[ "$STATUS" == "ok" ]]; then
-                  SUCCESS=1
-                  break 2
-                fi
-
-              elif [[ "$HTTP_CODE" == "401" ]]; then
-
-                echo "Website token rejected."
-
-              elif [[ "$HTTP_CODE" == "429" ]]; then
+              if [[ "$STATUS" == "ok" ]]; then
 
                 echo
-                echo "Gofile rate limit reached."
-                echo
-                echo "Stopping immediately to avoid making the rate limit worse."
-                echo
-                echo "Wait several minutes before rerunning the workflow."
+                echo "============================================================"
+                echo "             GOFILE TOKEN SUCCESSFULLY FOUND"
+                echo "============================================================"
 
-                exit 20
+                echo "GOFILE_WEBSITE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+                echo "GOFILE_WT_WINDOW=$WINDOW" >> "$GITHUB_ENV"
+                echo "GOFILE_WT_SECRET=$SECRET" >> "$GITHUB_ENV"
 
+                FOUND=1
+                break
               fi
 
-            done
-
-            if [[ "$SUCCESS" -eq 1 ]]; then
-              break
-            fi
-
-            if [[ "$attempt" -lt 3 ]]; then
-              WAIT=$((attempt * 30))
+            elif [[ "$HTTP_CODE" == "429" ]]; then
 
               echo
-              echo "Waiting ${WAIT} seconds..."
-              sleep "$WAIT"
+              echo "::error::Gofile rate limit reached."
+              echo
+              echo "The workflow will stop instead of hammering Gofile."
+              exit 20
+
             fi
 
-          done
+          done < "$TOKENS"
 
-          if [[ "$SUCCESS" -ne 1 ]]; then
+          if [[ "$FOUND" -ne 1 ]]; then
 
             echo
             echo "============================================================"
-            echo "                 GOFILE REQUEST FAILED"
+            echo "               NO VALID GOFILE TOKEN"
             echo "============================================================"
 
-            jq . "$RESPONSE" 2>/dev/null ||
-              cat "$RESPONSE"
+            echo
+            echo "Gofile response:"
+            jq . "$RESPONSE" 2>/dev/null || true
 
+            echo
+            echo "::error::Could not generate a valid Gofile website token."
             exit 1
           fi
 
@@ -720,7 +569,7 @@ jobs:
           jq . "$RESPONSE"
 
       # ==========================================================
-      # 8. Extract file information
+      # EXTRACT FILE
       # ==========================================================
 
       - name: Extract file information
@@ -732,7 +581,7 @@ jobs:
           echo "               EXTRACT FILE INFORMATION"
           echo "============================================================"
 
-          JSON="$RUNNER_TEMP/mistos-transfer/logs/gofile_content.json"
+          JSON="$RUNNER_TEMP/mistos/logs/content.json"
 
           python3 <<'PY'
           import json
@@ -740,9 +589,9 @@ jobs:
           import sys
 
           path = os.environ["RUNNER_TEMP"] + \
-                 "/mistos-transfer/logs/gofile_content.json"
+                 "/mistos/logs/content.json"
 
-          with open(path, encoding="utf-8") as f:
+          with open(path) as f:
               data = json.load(f)
 
           root = data.get("data", {})
@@ -755,79 +604,64 @@ jobs:
           children = root.get("children", {})
 
           if isinstance(children, dict):
-              for item in children.values():
-                  if item.get("type") == "file":
-                      files.append(item)
+              files.extend(
+                  x for x in children.values()
+                  if x.get("type") == "file"
+              )
 
           elif isinstance(children, list):
-              for item in children:
-                  if item.get("type") == "file":
-                      files.append(item)
+              files.extend(
+                  x for x in children
+                  if x.get("type") == "file"
+              )
 
           if not files:
-              print("ERROR: No downloadable file found.")
+              print("ERROR: No files found.")
               sys.exit(1)
 
-          if len(files) > 1:
+          if len(files) != 1:
               print(
-                  f"ERROR: Gofile contains {len(files)} files."
+                  f"ERROR: Expected one file, found {len(files)}."
               )
-              print(
-                  "This workflow expects one ROM file."
-              )
-              print(
-                  "Files:"
-              )
-
-              for item in files:
-                  print(
-                      item.get("name", "<unknown>")
-                  )
-
               sys.exit(1)
 
           item = files[0]
 
-          file_id = item.get("id", "")
           name = item.get("name", "")
           size = item.get("size", 0)
-          link = (
-              item.get("link")
-              or item.get("directLink")
-              or ""
-          )
+          link = item.get("link", "")
 
           if not name:
-              print("ERROR: Filename missing.")
+              print("ERROR: Missing filename.")
               sys.exit(1)
 
           if not link:
-              print("ERROR: Download URL missing.")
+              print("ERROR: Missing download link.")
               sys.exit(1)
 
           print(f"Filename: {name}")
           print(f"Size: {size}")
-          print(f"File ID: {file_id}")
 
-          env = os.environ["GITHUB_ENV"]
+          with open(
+              os.environ["GITHUB_ENV"],
+              "a"
+          ) as f:
 
-          with open(env, "a") as f:
-              f.write(
-                  f"GOFILE_FILE_ID={file_id}\n"
-              )
               f.write(
                   f"GOFILE_FILENAME={name}\n"
               )
+
               f.write(
                   f"GOFILE_EXPECTED_SIZE={size}\n"
               )
+
               f.write(
                   f"GOFILE_DIRECT_LINK={link}\n"
               )
           PY
 
       # ==========================================================
-      # 9. Download actual file
+      # DOWNLOAD
       # ==========================================================
 
       - name: Download Gofile file
@@ -839,22 +673,7 @@ jobs:
           echo "                    GOFILE DOWNLOAD"
           echo "============================================================"
 
-          DOWNLOAD_DIR="$RUNNER_TEMP/mistos-transfer/download"
-
-          mkdir -p "$DOWNLOAD_DIR"
-
-          OUTPUT="$DOWNLOAD_DIR/$GOFILE_FILENAME"
-
-          echo "Filename:"
-          echo "$GOFILE_FILENAME"
-
-          echo
-          echo "Expected size:"
-          echo "$GOFILE_EXPECTED_SIZE bytes"
-
-          echo
-          echo "Starting download..."
-          echo
+          OUTPUT="$RUNNER_TEMP/mistos/download/$GOFILE_FILENAME"
 
           curl \
             --location \
@@ -872,97 +691,58 @@ jobs:
             -o "$OUTPUT" \
             "$GOFILE_DIRECT_LINK"
 
-          echo
-          echo "Download completed."
-
           if [[ ! -s "$OUTPUT" ]]; then
             echo "::error::Downloaded file is empty."
             exit 1
           fi
 
+          SIZE="$(stat -c '%s' "$OUTPUT")"
+
           echo
-          ls -lh "$OUTPUT"
+          echo "Downloaded:"
+          echo "$GOFILE_FILENAME"
 
-          echo "DOWNLOADED_FILE=$OUTPUT" >> "$GITHUB_ENV"
-
-      # ==========================================================
-      # 10. Validate download
-      # ==========================================================
-
-      - name: Validate downloaded file
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "============================================================"
-          echo "                  DOWNLOAD VALIDATION"
-          echo "============================================================"
-
-          FILE="$DOWNLOADED_FILE"
-
-          SIZE="$(stat -c '%s' "$FILE")"
-          TYPE="$(file -b "$FILE")"
-          SHA256="$(sha256sum "$FILE" | awk '{print $1}')"
-
-          echo "Filename : $GOFILE_FILENAME"
-          echo "Size     : $SIZE bytes"
-          echo "Type     : $TYPE"
-          echo "SHA256   : $SHA256"
+          echo
+          echo "Size:"
+          echo "$SIZE bytes"
 
           if [[ "$SIZE" -lt 10000 ]]; then
-            echo
-            echo "::error::Downloaded file is suspiciously small."
-
-            echo
-            echo "Response:"
-            head -c 1000 "$FILE" || true
-
+            echo "::error::Downloaded response is suspiciously small."
+            head -c 1000 "$OUTPUT" || true
             exit 1
           fi
 
-          if echo "$TYPE" |
-            grep -qiE \
-              'HTML document|XML document|ASCII text|Unicode text|JSON'; then
-
-            echo
-            echo "::error::Downloaded file appears to be HTML/text/JSON."
-
-            echo
-            echo "First bytes:"
-            head -c 1000 "$FILE" || true
-
-            exit 1
-          fi
-
-          if [[ "$GOFILE_EXPECTED_SIZE" =~ ^[0-9]+$ ]] &&
-             [[ "$GOFILE_EXPECTED_SIZE" -gt 0 ]]; then
-
-            if [[ "$SIZE" -ne "$GOFILE_EXPECTED_SIZE" ]]; then
-
-              echo
-              echo "::error::File size mismatch."
-
-              echo "Expected: $GOFILE_EXPECTED_SIZE"
-              echo "Actual  : $SIZE"
-
-              exit 1
-            fi
-          fi
+          TYPE="$(file -b "$OUTPUT")"
 
           echo
-          echo "Download validation PASSED."
+          echo "Type:"
+          echo "$TYPE"
 
-          {
-            echo "DOWNLOADED_SIZE=$SIZE"
-            echo "DOWNLOADED_SHA256=$SHA256"
-          } >> "$GITHUB_ENV"
+          if echo "$TYPE" |
+             grep -qiE 'HTML|ASCII text|Unicode text|JSON|XML'; then
+
+            echo "::error::Downloaded response is not a binary file."
+
+            head -c 1000 "$OUTPUT" || true
+
+            exit 1
+          fi
+
+          SHA="$(sha256sum "$OUTPUT" | awk '{print $1}')"
+
+          echo
+          echo "SHA256:"
+          echo "$SHA"
+
+          echo "DOWNLOADED_FILE=$OUTPUT" >> "$GITHUB_ENV"
+          echo "DOWNLOADED_SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "DOWNLOADED_SHA256=$SHA" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 11. Test SourceForge
+      # SOURCEFORGE CONNECTION
       # ==========================================================
 
       - name: Test SourceForge connection
-        shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
           SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
@@ -970,7 +750,7 @@ jobs:
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "             SOURCEFORGE CONNECTION TEST"
+          echo "             SOURCEFORGE CONNECTION"
           echo "============================================================"
 
           SCRIPT="$RUNNER_TEMP/sourceforge_test.txt"
@@ -988,8 +768,6 @@ jobs:
             -oBatchMode=no \
             -oStrictHostKeyChecking=no \
             -oConnectTimeout=60 \
-            -oServerAliveInterval=30 \
-            -oServerAliveCountMax=10 \
             -b "$SCRIPT" \
             "${SOURCEFORGE_USER}@frs.sourceforge.net"
 
@@ -997,11 +775,10 @@ jobs:
           echo "SourceForge connection successful."
 
       # ==========================================================
-      # 12. Check/create device directory
+      # DEVICE DIRECTORY
       # ==========================================================
 
-      - name: Check or create SourceForge device directory
-        shell: bash
+      - name: Check or create device directory
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
           SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
@@ -1010,11 +787,10 @@ jobs:
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "            SOURCEFORGE DEVICE DIRECTORY"
+          echo "             SOURCEFORGE DEVICE DIRECTORY"
           echo "============================================================"
 
           BASE="/home/frs/project-mistos/Android17"
-          DEVICE_DIR="${BASE}/${DEVICE}"
 
           CHECK="$RUNNER_TEMP/sourceforge_check.txt"
 
@@ -1035,7 +811,7 @@ jobs:
             -oConnectTimeout=60 \
             -b "$CHECK" \
             "${SOURCEFORGE_USER}@frs.sourceforge.net" \
-            > "$RUNNER_TEMP/mistos-transfer/logs/device_check.log" 2>&1
+            > "$RUNNER_TEMP/mistos/logs/device.log" 2>&1
 
           STATUS=$?
 
@@ -1043,15 +819,11 @@ jobs:
 
           if [[ "$STATUS" -eq 0 ]]; then
 
-            echo "Device directory already exists."
-            echo "Using:"
-            echo "$DEVICE_DIR"
+            echo "Device directory exists."
 
           else
 
-            echo "Device directory does not exist."
-            echo "Creating:"
-            echo "$DEVICE_DIR"
+            echo "Creating device directory..."
 
             CREATE="$RUNNER_TEMP/sourceforge_create.txt"
 
@@ -1072,17 +844,15 @@ jobs:
               "${SOURCEFORGE_USER}@frs.sourceforge.net"
 
             echo "Device directory created."
-
           fi
 
-          echo "SOURCEFORGE_DEVICE_DIR=$DEVICE_DIR" >> "$GITHUB_ENV"
+          echo "SOURCEFORGE_DEVICE_DIR=${BASE}/${DEVICE}" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 13. Upload
+      # UPLOAD
       # ==========================================================
 
       - name: Upload to SourceForge
-        shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
           SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
@@ -1104,10 +874,6 @@ jobs:
           echo "SHA256:"
           echo "$DOWNLOADED_SHA256"
 
-          echo
-          echo "Destination:"
-          echo "$SOURCEFORGE_DEVICE_DIR"
-
           SCRIPT="$RUNNER_TEMP/sourceforge_upload.txt"
 
           cat > "$SCRIPT" <<EOF
@@ -1118,9 +884,6 @@ jobs:
           EOF
 
           chmod 600 "$SCRIPT"
-
-          echo
-          echo "Uploading..."
 
           SSHPASS="$SOURCEFORGE_PASSWORD" \
           sshpass -e sftp \
@@ -1136,11 +899,10 @@ jobs:
           echo "Upload completed."
 
       # ==========================================================
-      # 14. Verify upload
+      # VERIFY
       # ==========================================================
 
       - name: Verify SourceForge upload
-        shell: bash
         env:
           SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
           SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
@@ -1170,14 +932,16 @@ jobs:
             "${SOURCEFORGE_USER}@frs.sourceforge.net"
 
           echo
-          echo "Remote file verified."
+          echo "============================================================"
+          echo "                    UPLOAD VERIFIED"
+          echo "============================================================"
 
           echo
-          echo "SourceForge URL:"
-          echo "https://sourceforge.net/projects/project-mistos/files/Android17/${{ inputs.device }}/${GOFILE_FILENAME}"
+          echo "SourceForge:"
+          echo "https://sourceforge.net/projects/project-mistos/files/Android17/${{ inputs.device }}/"
 
       # ==========================================================
-      # 15. Cleanup ALWAYS
+      # CLEANUP
       # ==========================================================
 
       - name: Cleanup
@@ -1190,11 +954,7 @@ jobs:
           echo "                       CLEANUP"
           echo "============================================================"
 
-          rm -rf \
-            "$RUNNER_TEMP/mistos-transfer/download"
-
-          rm -rf \
-            "$RUNNER_TEMP/mistos-transfer"
+          rm -rf "$RUNNER_TEMP/mistos"
 
           rm -f \
             "$RUNNER_TEMP/sourceforge_test.txt" \
@@ -1207,41 +967,34 @@ jobs:
           echo "Cleanup complete."
 
       # ==========================================================
-      # 16. Final summary
+      # SUMMARY
       # ==========================================================
 
-      - name: Final summary
+      - name: Summary
         if: always()
-        shell: bash
         run: |
           echo
           echo "============================================================"
           echo "                    TRANSFER SUMMARY"
           echo "============================================================"
 
-          echo "Device : ${{ inputs.device }}"
+          echo "Device: ${{ inputs.device }}"
 
           if [[ -n "${GOFILE_FILENAME:-}" ]]; then
-            echo "File   : $GOFILE_FILENAME"
+            echo "File: $GOFILE_FILENAME"
           fi
 
           if [[ -n "${DOWNLOADED_SIZE:-}" ]]; then
-            echo "Size   : $DOWNLOADED_SIZE bytes"
+            echo "Size: $DOWNLOADED_SIZE bytes"
           fi
 
           if [[ -n "${DOWNLOADED_SHA256:-}" ]]; then
-            echo "SHA256 : $DOWNLOADED_SHA256"
+            echo "SHA256: $DOWNLOADED_SHA256"
           fi
 
           echo
           echo "Directory:"
           echo "https://sourceforge.net/projects/project-mistos/files/Android17/${{ inputs.device }}/"
-
-          if [[ -n "${GOFILE_FILENAME:-}" ]]; then
-            echo
-            echo "File:"
-            echo "https://sourceforge.net/projects/project-mistos/files/Android17/${{ inputs.device }}/${GOFILE_FILENAME}"
-          fi
 
           echo
           echo "============================================================"
