@@ -1,10 +1,10 @@
-name: Gofile → SourceForge
+name: Gofile to SourceForge
 
 on:
   workflow_dispatch:
     inputs:
       gofile_url:
-        description: "Gofile download URL"
+        description: "Gofile share/download URL"
         required: true
         type: string
 
@@ -16,17 +16,17 @@ on:
 permissions:
   contents: read
 
+env:
+  SOURCEFORGE_HOST: frs.sourceforge.net
+  SOURCEFORGE_BASE: /home/frs/project/project-mistos/Android17
+
+  GOFILE_USER_AGENT: "MistOS-Gofile-Uploader/1.0"
+  GOFILE_LANGUAGE: "en-US"
+
 jobs:
-  transfer:
+  upload:
     name: Download Gofile → Upload SourceForge
     runs-on: ubuntu-latest
-
-    env:
-      SOURCEFORGE_HOST: frs.sourceforge.net
-      SOURCEFORGE_BASE: /home/frs/project/project-mistos/Android17
-
-      GOFILE_USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-      GOFILE_LANGUAGE: "en-US"
 
     steps:
 
@@ -47,26 +47,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "INSTALLING DEPENDENCIES"
-          echo "============================================================"
-
           sudo apt-get update
 
           sudo apt-get install -y \
             curl \
             jq \
-            sshpass \
-            file
+            openssh-client \
+            rsync \
+            file \
+            nodejs
 
           echo
           echo "Installed versions:"
-
           curl --version | head -n 1
           jq --version
           node --version
-          sshpass -V 2>&1 | head -n 1
-          file --version | head -n 1
+          rsync --version | head -n 1
 
 
       # ============================================================
@@ -78,19 +74,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          WORK="$RUNNER_TEMP/mistos"
+          mkdir -p "$RUNNER_TEMP/mistos-gofile"
 
-          rm -rf "$WORK"
-          mkdir -p "$WORK"
+          echo "WORK_DIR=$RUNNER_TEMP/mistos-gofile" >> "$GITHUB_ENV"
 
-          echo "WORK=$WORK" >> "$GITHUB_ENV"
-
-          echo "============================================================"
-          echo "PREPARING WORKSPACE"
-          echo "============================================================"
-
+          echo
           echo "Workspace:"
-          echo "$WORK"
+          echo "$RUNNER_TEMP/mistos-gofile"
 
 
       # ============================================================
@@ -99,15 +89,14 @@ jobs:
 
       - name: Validate inputs
         shell: bash
+        env:
+          GOFILE_URL_INPUT: ${{ inputs.gofile_url }}
+          DEVICE_INPUT: ${{ inputs.device }}
         run: |
           set -euo pipefail
 
-          GOFILE_URL="${{ inputs.gofile_url }}"
-          DEVICE="${{ inputs.device }}"
-
-          echo "============================================================"
-          echo "VALIDATING INPUTS"
-          echo "============================================================"
+          GOFILE_URL="$(echo "$GOFILE_URL_INPUT" | xargs)"
+          DEVICE="$(echo "$DEVICE_INPUT" | xargs)"
 
           if [[ -z "$GOFILE_URL" ]]; then
             echo "ERROR: Gofile URL is empty."
@@ -119,25 +108,74 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$DEVICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "ERROR: Invalid device name:"
-            echo "$DEVICE"
-            echo
-            echo "Allowed:"
-            echo "A-Z a-z 0-9 . _ -"
+          if [[ ! "$GOFILE_URL" =~ ^https?:// ]]; then
+            echo "ERROR: Invalid Gofile URL."
             exit 1
           fi
 
-          echo
-          echo "Gofile URL:"
-          echo "$GOFILE_URL"
-
-          echo
-          echo "Device:"
-          echo "$DEVICE"
+          # Device directory must contain only safe characters.
+          if [[ ! "$DEVICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "ERROR: Invalid device name."
+            echo "Allowed characters: A-Z a-z 0-9 . _ -"
+            exit 1
+          fi
 
           echo "GOFILE_URL=$GOFILE_URL" >> "$GITHUB_ENV"
           echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+
+          echo
+          echo "=============================================="
+          echo "INPUT VALIDATION"
+          echo "=============================================="
+          echo "Gofile URL : $GOFILE_URL"
+          echo "Device     : $DEVICE"
+
+
+      # ============================================================
+      # CLEANUP TRAP
+      # ============================================================
+
+      - name: Configure cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$WORK_DIR/cleanup.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set +e
+
+          echo
+          echo "=============================================="
+          echo "CLEANUP"
+          echo "=============================================="
+
+          if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
+            echo "Removing downloaded files..."
+            rm -rf "$WORK_DIR"
+          fi
+
+          if [[ -f "$HOME/.ssh/sourceforge_mistos" ]]; then
+            rm -f "$HOME/.ssh/sourceforge_mistos"
+          fi
+
+          if [[ -f "$HOME/.ssh/sourceforge_mistos.pub" ]]; then
+            rm -f "$HOME/.ssh/sourceforge_mistos.pub"
+          fi
+
+          if [[ -f "$HOME/.ssh/config" ]]; then
+            rm -f "$HOME/.ssh/config"
+          fi
+
+          if [[ -f "$HOME/.ssh/known_hosts" ]]; then
+            rm -f "$HOME/.ssh/known_hosts"
+          fi
+
+          echo "Cleanup completed."
+          EOF
+
+          chmod +x "$WORK_DIR/cleanup.sh"
+
+          trap '"$WORK_DIR/cleanup.sh"' EXIT
 
 
       # ============================================================
@@ -149,124 +187,134 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "EXTRACT GOFILE ID"
-          echo "============================================================"
-
           GOFILE_ID=""
 
-          if [[ "$GOFILE_URL" =~ /d/([^/?#]+) ]]; then
+          if [[ "$GOFILE_URL" =~ /d/([A-Za-z0-9]+) ]]; then
             GOFILE_ID="${BASH_REMATCH[1]}"
-
-          elif [[ "$GOFILE_URL" =~ /contents/([^/?#]+) ]]; then
+          elif [[ "$GOFILE_URL" =~ /folder/([A-Za-z0-9]+) ]]; then
+            GOFILE_ID="${BASH_REMATCH[1]}"
+          elif [[ "$GOFILE_URL" =~ /contents/([A-Za-z0-9]+) ]]; then
             GOFILE_ID="${BASH_REMATCH[1]}"
           fi
 
           if [[ -z "$GOFILE_ID" ]]; then
-            echo
             echo "ERROR: Could not extract Gofile content ID."
-            echo
-            echo "URL:"
-            echo "$GOFILE_URL"
+            echo "URL: $GOFILE_URL"
             exit 1
           fi
-
-          echo "Gofile ID:"
-          echo "$GOFILE_ID"
 
           echo "GOFILE_ID=$GOFILE_ID" >> "$GITHUB_ENV"
 
+          echo
+          echo "=============================================="
+          echo "GOFILE ID"
+          echo "=============================================="
+          echo "ID: $GOFILE_ID"
+
 
       # ============================================================
-      # DOWNLOAD GOFILE WT SCRIPT
+      # DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT
       # ============================================================
 
-      - name: Get Gofile website-token script
+      - name: Download Gofile Website Token script
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "GET GOFILE WEBSITE TOKEN SCRIPT"
-          echo "============================================================"
+          WT_SCRIPT="$WORK_DIR/wt.js"
 
-          WT_SCRIPT="$WORK/gofile_wt.js"
+          echo
+          echo "=============================================="
+          echo "DOWNLOAD GOFILE WEBSITE TOKEN SCRIPT"
+          echo "=============================================="
 
-          URLS=(
-            "https://gofile.io/js/wt.obf.js"
-            "https://gofile.io/dist/js/wt.obf.js"
-          )
+          STATUS="$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --write-out "%{http_code}" \
+            --output "$WT_SCRIPT" \
+            --connect-timeout 30 \
+            --max-time 60 \
+            "https://gofile.io/js/wt.obf.js")"
 
-          FOUND=0
+          if [[ "$STATUS" != "200" || ! -s "$WT_SCRIPT" ]]; then
+            echo "Primary WT script failed."
 
-          for URL in "${URLS[@]}"; do
+            echo "Trying fallback location..."
 
-            echo
-            echo "Trying:"
-            echo "$URL"
+            STATUS="$(curl \
+              --silent \
+              --show-error \
+              --location \
+              --write-out "%{http_code}" \
+              --output "$WT_SCRIPT" \
+              --connect-timeout 30 \
+              --max-time 60 \
+              "https://gofile.io/dist/js/wt.obf.js")"
+          fi
 
-            HTTP_CODE="$(
-              curl \
-                --silent \
-                --show-error \
-                --location \
-                --output "$WT_SCRIPT" \
-                --write-out "%{http_code}" \
-                --connect-timeout 20 \
-                --max-time 60 \
-                -A "$GOFILE_USER_AGENT" \
-                "$URL" \
-                || true
-            )"
-
-            echo "HTTP: $HTTP_CODE"
-
-            if [[ "$HTTP_CODE" == "200" ]] &&
-               [[ -s "$WT_SCRIPT" ]]; then
-
-              SIZE="$(wc -c < "$WT_SCRIPT")"
-
-              if (( SIZE > 1000 )); then
-
-                echo
-                echo "WT script downloaded."
-                echo "WT script size: $SIZE bytes"
-
-                FOUND=1
-                break
-              fi
-            fi
-          done
-
-          if [[ "$FOUND" != "1" ]]; then
-            echo
+          if [[ "$STATUS" != "200" || ! -s "$WT_SCRIPT" ]]; then
             echo "ERROR: Could not download Gofile WT script."
+            echo "HTTP status: $STATUS"
             exit 1
           fi
 
+          echo "WT script downloaded successfully."
+          echo "Size: $(stat -c '%s' "$WT_SCRIPT") bytes"
+
 
       # ============================================================
-      # EXTRACT DYNAMIC WT SECRET
+      # EXTRACT DYNAMIC GOFILE WT SECRET
       # ============================================================
 
-      - name: Extract Gofile WT secret
+      - name: Extract Gofile Website Token secret
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "EXTRACT GOFILE WEBSITE TOKEN SECRET"
-          echo "============================================================"
+          WT_SCRIPT="$WORK_DIR/wt.js"
+          WT_SECRET_FILE="$WORK_DIR/wt-secret"
 
-          cat > "$WORK/extract_wt_secret.js" <<'NODE'
+          node "$WORK_DIR/extract-wt.js" "$WT_SCRIPT" "$WT_SECRET_FILE"
+
+          if [[ ! -s "$WT_SECRET_FILE" ]]; then
+            echo "ERROR: WT secret extraction failed."
+            exit 1
+          fi
+
+          WT_SECRET="$(cat "$WT_SECRET_FILE")"
+
+          if [[ -z "$WT_SECRET" ]]; then
+            echo "ERROR: WT secret is empty."
+            exit 1
+          fi
+
+          echo "GOFILE_WT_SECRET=$WT_SECRET" >> "$GITHUB_ENV"
+
+          echo
+          echo "Gofile Website Token secret extracted successfully."
+
+
+      # ============================================================
+      # CREATE NODE WT EXTRACTION SCRIPT
+      # ============================================================
+
+      - name: Create WT extraction helper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$WORK_DIR/extract-wt.js" <<'NODE'
           const fs = require("fs");
           const vm = require("vm");
           const crypto = require("crypto");
 
           const scriptFile = process.argv[2];
+          const outputFile = process.argv[3];
 
-          if (!scriptFile) {
-            throw new Error("Missing script file");
+          if (!scriptFile || !outputFile) {
+            throw new Error("Usage: node extract-wt.js <script> <output>");
           }
 
           const script = fs.readFileSync(scriptFile, "utf8");
@@ -319,16 +367,23 @@ jobs:
             script,
             context,
             {
-              timeout: 3000
+              timeout: 5000
             }
           );
 
           if (typeof context.generateWT !== "function") {
-            throw new Error(
-              "generateWT() was not found in wt.obf.js"
-            );
+            throw new Error("generateWT function was not found.");
           }
 
+          /*
+           * The Gofile website generates the Website Token by hashing
+           * a string containing:
+           *
+           * userAgent::language::accountToken::timeWindow::secret
+           *
+           * We intercept the SHA256 input so the current secret can
+           * be recovered without hardcoding an old Gofile secret.
+           */
           context._sha256 = (input) => {
             rawHashInput = String(input);
             return "0".repeat(64);
@@ -338,14 +393,12 @@ jobs:
             `generateWT(${JSON.stringify(probeToken)})`,
             context,
             {
-              timeout: 3000
+              timeout: 5000
             }
           );
 
           if (!rawHashInput) {
-            throw new Error(
-              "generateWT() did not call intercepted SHA-256"
-            );
+            throw new Error("Gofile WT hash input was not captured.");
           }
 
           const expectedPrefix =
@@ -353,52 +406,36 @@ jobs:
 
           if (!rawHashInput.startsWith(expectedPrefix)) {
             throw new Error(
-              "Unexpected Gofile WT hash input format: " +
-              rawHashInput
+              "Unexpected Gofile WT hash format:\n" + rawHashInput
             );
           }
 
-          const remainder =
+          const remaining =
             rawHashInput.slice(expectedPrefix.length);
 
-          const parts = remainder.split("::");
+          const parts = remaining.split("::");
 
           if (parts.length < 2) {
             throw new Error(
-              "Could not extract Gofile WT secret"
+              "Could not extract WT secret from hash input."
             );
           }
 
-          const secret = parts.slice(1).join("::").trim();
+          /*
+           * The last component is the dynamic secret.
+           */
+          const secret = parts[parts.length - 1].trim();
 
           if (!secret) {
-            throw new Error(
-              "Extracted Gofile WT secret is empty"
-            );
+            throw new Error("Extracted Gofile WT secret is empty.");
           }
 
-          process.stdout.write(secret);
+          fs.writeFileSync(outputFile, secret + "\n");
+
+          console.log("Gofile WT secret extracted.");
           NODE
 
-          SECRET="$(
-            node \
-              "$WORK/extract_wt_secret.js" \
-              "$WORK/gofile_wt.js"
-          )"
-
-          if [[ -z "$SECRET" ]]; then
-            echo "ERROR: No Gofile WT secret found."
-            exit 1
-          fi
-
-          echo
-          echo "Gofile WT secret extracted successfully."
-
-          {
-            echo "GOFILE_WT_SECRET<<EOF"
-            echo "$SECRET"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          echo "WT helper created."
 
 
       # ============================================================
@@ -410,223 +447,139 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
+          echo
+          echo "=============================================="
           echo "CREATE GOFILE GUEST ACCOUNT"
-          echo "============================================================"
+          echo "=============================================="
 
-          ACCOUNT_RESPONSE="$WORK/account.json"
+          TIME_WINDOW="$(( $(date +%s) / 14400 ))"
 
-          CURRENT_WINDOW="$(date +%s)"
-          CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
+          echo "Time window: $TIME_WINDOW"
 
-          echo "Current WT time window:"
-          echo "$CURRENT_WINDOW"
+          INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
 
-          WT_INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::::${CURRENT_WINDOW}::${GOFILE_WT_SECRET}"
+          WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
 
-          WT="$(
-            printf '%s' "$WT_INPUT" |
-            sha256sum |
-            awk '{print $1}'
-          )"
+          RESPONSE="$WORK_DIR/account.json"
+
+          HTTP_STATUS="$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --compressed \
+            --output "$RESPONSE" \
+            --write-out "%{http_code}" \
+            --connect-timeout 30 \
+            --max-time 60 \
+            -A "$GOFILE_USER_AGENT" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "X-Website-Token: $WT" \
+            -H "X-BL: $GOFILE_LANGUAGE" \
+            -H "Origin: https://gofile.io" \
+            -H "Referer: https://gofile.io/" \
+            -X POST \
+            "https://api.gofile.io/accounts")
+
+          echo "HTTP status: $HTTP_STATUS"
+
+          if [[ "$HTTP_STATUS" != "200" ]]; then
+            echo "ERROR: Gofile guest account creation failed."
+            cat "$RESPONSE"
+            exit 1
+          fi
+
+          GOFILE_TOKEN="$(jq -r '.data.token // empty' "$RESPONSE")"
+
+          if [[ -z "$GOFILE_TOKEN" || "$GOFILE_TOKEN" == "null" ]]; then
+            echo "ERROR: Gofile account token was not returned."
+            cat "$RESPONSE"
+            exit 1
+          fi
+
+          echo "GOFILE_TOKEN=$GOFILE_TOKEN" >> "$GITHUB_ENV"
+
+          echo "Gofile guest account created successfully."
+
+
+      # ============================================================
+      # GET GOFILE CONTENT METADATA
+      # ============================================================
+
+      - name: Get Gofile content metadata
+        shell: bash
+        run: |
+          set -euo pipefail
 
           echo
-          echo "Creating guest account..."
+          echo "=============================================="
+          echo "GET GOFILE CONTENT"
+          echo "=============================================="
 
-          HTTP_CODE="$(
-            curl \
+          RESPONSE="$WORK_DIR/content.json"
+
+          SUCCESS=0
+
+          CURRENT_WINDOW="$(( $(date +%s) / 14400 ))"
+
+          for OFFSET in 0 1 2 3; do
+
+            TIME_WINDOW="$((CURRENT_WINDOW - OFFSET))"
+
+            echo
+            echo "Trying WT time window: $TIME_WINDOW"
+
+            INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::${GOFILE_TOKEN}::${TIME_WINDOW}::${GOFILE_WT_SECRET}"
+
+            WT="$(printf '%s' "$INPUT" | sha256sum | awk '{print $1}')"
+
+            HTTP_STATUS="$(curl \
               --silent \
               --show-error \
               --location \
               --compressed \
-              --output "$ACCOUNT_RESPONSE" \
+              --output "$RESPONSE" \
               --write-out "%{http_code}" \
               --connect-timeout 30 \
               --max-time 90 \
               -A "$GOFILE_USER_AGENT" \
               -H "Accept: application/json" \
-              -H "Authorization: Bearer " \
-              -H "X-Website-Token: ${WT}" \
-              -H "X-BL: ${GOFILE_LANGUAGE}" \
+              -H "Authorization: Bearer $GOFILE_TOKEN" \
+              -H "X-Website-Token: $WT" \
+              -H "X-BL: $GOFILE_LANGUAGE" \
               -H "Origin: https://gofile.io" \
               -H "Referer: https://gofile.io/" \
-              -X POST \
-              "https://api.gofile.io/accounts" \
-              || true
-          )"
+              -G \
+              --data-urlencode "contentFilter=" \
+              --data-urlencode "page=1" \
+              --data-urlencode "pageSize=1000" \
+              --data-urlencode "sortField=name" \
+              --data-urlencode "sortDirection=1" \
+              "https://api.gofile.io/contents/${GOFILE_ID}")
 
-          echo "HTTP status: $HTTP_CODE"
+            echo "HTTP status: $HTTP_STATUS"
 
-          if [[ "$HTTP_CODE" != "200" ]]; then
-
-            echo
-            echo "ERROR: Gofile guest account creation failed."
-
-            jq . "$ACCOUNT_RESPONSE" 2>/dev/null ||
-              cat "$ACCOUNT_RESPONSE"
-
-            exit 1
-          fi
-
-          API_STATUS="$(
-            jq -r '.status // empty' "$ACCOUNT_RESPONSE" 2>/dev/null ||
-            true
-          )"
-
-          echo "API status: $API_STATUS"
-
-          if [[ "$API_STATUS" != "ok" ]]; then
-
-            echo
-            echo "ERROR: Gofile account API did not return status=ok."
-
-            jq . "$ACCOUNT_RESPONSE" 2>/dev/null ||
-              cat "$ACCOUNT_RESPONSE"
-
-            exit 1
-          fi
-
-          GOFILE_TOKEN="$(
-            jq -r '.data.token // empty' "$ACCOUNT_RESPONSE"
-          )"
-
-          if [[ -z "$GOFILE_TOKEN" ]]; then
-            echo
-            echo "ERROR: Gofile account token is missing."
-            exit 1
-          fi
-
-          echo
-          echo "Gofile guest account created successfully."
-
-          echo "GOFILE_TOKEN=$GOFILE_TOKEN" >> "$GITHUB_ENV"
-
-
-      # ============================================================
-      # GET GOFILE CONTENT
-      # ============================================================
-
-      - name: Get Gofile content
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "============================================================"
-          echo "GET GOFILE CONTENT"
-          echo "============================================================"
-
-          RESPONSE="$WORK/gofile_content.json"
-
-          SUCCESS=0
-
-          CURRENT_WINDOW="$(date +%s)"
-          CURRENT_WINDOW=$(( CURRENT_WINDOW / 14400 ))
-
-          for OFFSET in 0 1 2; do
-
-            WINDOW=$(( CURRENT_WINDOW - OFFSET ))
-
-            echo
-            echo "Trying WT time window: $WINDOW"
-
-            WT_INPUT="${GOFILE_USER_AGENT}::${GOFILE_LANGUAGE}::${GOFILE_TOKEN}::${WINDOW}::${GOFILE_WT_SECRET}"
-
-            WT="$(
-              printf '%s' "$WT_INPUT" |
-              sha256sum |
-              awk '{print $1}'
-            )"
-
-            HTTP_CODE="$(
-              curl \
-                --silent \
-                --show-error \
-                --location \
-                --compressed \
-                --output "$RESPONSE" \
-                --write-out "%{http_code}" \
-                --connect-timeout 30 \
-                --max-time 90 \
-                -A "$GOFILE_USER_AGENT" \
-                -H "Accept: application/json" \
-                -H "Authorization: Bearer ${GOFILE_TOKEN}" \
-                -H "X-Website-Token: ${WT}" \
-                -H "X-BL: ${GOFILE_LANGUAGE}" \
-                -H "Origin: https://gofile.io" \
-                -H "Referer: https://gofile.io/" \
-                -G \
-                --data-urlencode "contentFilter=" \
-                --data-urlencode "page=1" \
-                --data-urlencode "pageSize=1000" \
-                --data-urlencode "sortField=name" \
-                --data-urlencode "sortDirection=1" \
-                "https://api.gofile.io/contents/${GOFILE_ID}" \
-                || true
-            )"
-
-            echo "HTTP status: $HTTP_CODE"
-
-            if [[ "$HTTP_CODE" == "200" ]]; then
-
-              STATUS="$(
-                jq -r '.status // empty' "$RESPONSE" 2>/dev/null ||
-                true
-              )"
-
-              echo "API status: $STATUS"
-
-              if [[ "$STATUS" == "ok" ]]; then
-
-                SUCCESS=1
-
-                echo
-                echo "GOFILE CONTENT FOUND"
-                echo
-
-                jq . "$RESPONSE"
-
-                break
-              fi
-
-              echo
-              echo "Gofile returned HTTP 200 but API status was not ok."
-
-              jq . "$RESPONSE" 2>/dev/null ||
-                cat "$RESPONSE"
-
-            elif [[ "$HTTP_CODE" == "429" ]]; then
-
-              echo
-              echo "Gofile rate limit reached."
-              echo "Waiting before retry..."
-
-              sleep 10
-
-            else
-
-              echo
-              echo "Gofile response:"
-
-              jq . "$RESPONSE" 2>/dev/null ||
-                cat "$RESPONSE"
-
+            if [[ "$HTTP_STATUS" == "200" ]] && jq -e '.status == "ok"' "$RESPONSE" >/dev/null 2>&1; then
+              SUCCESS=1
+              break
             fi
-
-            sleep 2
 
           done
 
           if [[ "$SUCCESS" != "1" ]]; then
-
             echo
-            echo "============================================================"
-            echo "GOFILE CONTENT REQUEST FAILED"
-            echo "============================================================"
+            echo "ERROR: Gofile content request failed."
 
-            cat "$RESPONSE" 2>/dev/null || true
+            if [[ -f "$RESPONSE" ]]; then
+              head -c 5000 "$RESPONSE" || true
+              echo
+            fi
 
             exit 1
           fi
+
+          echo
+          echo "Gofile metadata retrieved successfully."
 
 
       # ============================================================
@@ -638,128 +591,113 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "EXTRACT GOFILE FILE INFORMATION"
-          echo "============================================================"
+          RESPONSE="$WORK_DIR/content.json"
 
-          RESPONSE="$WORK/gofile_content.json"
+          echo
+          echo "=============================================="
+          echo "EXTRACT GOFILE FILE"
+          echo "=============================================="
 
-          TYPE="$(
-            jq -r '.data.type // empty' "$RESPONSE"
-          )"
+          DATA_TYPE="$(jq -r '.data.type // empty' "$RESPONSE")"
 
-          echo "Content type: ${TYPE:-unknown}"
+          DOWNLOAD_URL=""
+          FILE_NAME=""
+          FILE_ID=""
 
-          if [[ "$TYPE" == "file" ]]; then
+          if [[ "$DATA_TYPE" == "file" ]]; then
 
-            FILE_JSON="$(
-              jq -c '.data' "$RESPONSE"
-            )"
+            DOWNLOAD_URL="$(jq -r '.data.link // empty' "$RESPONSE")"
+            FILE_NAME="$(jq -r '.data.name // empty' "$RESPONSE")"
+            FILE_ID="$(jq -r '.data.id // empty' "$RESPONSE")"
 
           else
 
-            CHILDREN_TYPE="$(
-              jq -r '.data.children | type // empty' "$RESPONSE"
-            )"
+            CHILD_COUNT="$(jq '
+              if (.data.children | type) == "object"
+              then (.data.children | length)
+              elif (.data.children | type) == "array"
+              then (.data.children | length)
+              else 0
+              end
+            ' "$RESPONSE")"
 
-            if [[ "$CHILDREN_TYPE" == "object" ]]; then
+            echo "Children found: $CHILD_COUNT"
 
-              FILE_JSON="$(
-                jq -c '
-                  [
-                    .data.children[]
-                    | select(.type == "file")
-                  ]
-                  | if length == 1
-                    then .[0]
-                    else
-                      error(
-                        "Expected exactly one file, found \(length)"
-                      )
-                    end
-                ' "$RESPONSE"
-              )"
-
-            elif [[ "$CHILDREN_TYPE" == "array" ]]; then
-
-              FILE_JSON="$(
-                jq -c '
-                  [
-                    .data.children[]
-                    | select(.type == "file")
-                  ]
-                  | if length == 1
-                    then .[0]
-                    else
-                      error(
-                        "Expected exactly one file, found \(length)"
-                      )
-                    end
-                ' "$RESPONSE"
-              )"
-
-            else
-
+            if [[ "$CHILD_COUNT" != "1" ]]; then
               echo
-              echo "ERROR: No usable Gofile file found."
+              echo "ERROR: Expected exactly one file."
+              echo "The supplied Gofile link must point to a single-file share."
               exit 1
-
             fi
+
+            if jq -e '.data.children | type == "object"' "$RESPONSE" >/dev/null; then
+              CHILD="$(jq -c '.data.children | to_entries[0].value' "$RESPONSE")"
+            else
+              CHILD="$(jq -c '.data.children[0]' "$RESPONSE")"
+            fi
+
+            DOWNLOAD_URL="$(echo "$CHILD" | jq -r '.link // empty')"
+            FILE_NAME="$(echo "$CHILD" | jq -r '.name // empty')"
+            FILE_ID="$(echo "$CHILD" | jq -r '.id // empty')"
+
           fi
 
-          GOFILE_FILENAME="$(
-            jq -r '.name // empty' <<< "$FILE_JSON"
-          )"
-
-          GOFILE_LINK="$(
-            jq -r '.link // empty' <<< "$FILE_JSON"
-          )"
-
-          GOFILE_SIZE="$(
-            jq -r '.size // 0' <<< "$FILE_JSON"
-          )"
-
-          if [[ -z "$GOFILE_FILENAME" ]]; then
-            echo "ERROR: Gofile filename is missing."
+          if [[ -z "$DOWNLOAD_URL" ]]; then
+            echo "ERROR: Could not find download URL."
             exit 1
           fi
 
-          if [[ -z "$GOFILE_LINK" ]]; then
-            echo "ERROR: Gofile download link is missing."
+          if [[ -z "$FILE_NAME" ]]; then
+            echo "ERROR: Could not determine filename."
             exit 1
           fi
 
-          GOFILE_FILENAME="$(basename -- "$GOFILE_FILENAME")"
-
-          if [[ "$GOFILE_FILENAME" == "." ||
-                "$GOFILE_FILENAME" == ".." ||
-                "$GOFILE_FILENAME" == */* ]]; then
-
-            echo "ERROR: Unsafe filename:"
-            echo "$GOFILE_FILENAME"
-
+          if [[ -z "$FILE_ID" ]]; then
+            echo "ERROR: Could not determine file ID."
             exit 1
           fi
 
-          echo
-          echo "Filename:"
-          echo "$GOFILE_FILENAME"
+          # Remove dangerous path components.
+          FILE_NAME="$(basename "$FILE_NAME")"
+
+          if [[ "$FILE_NAME" == "." || "$FILE_NAME" == ".." || -z "$FILE_NAME" ]]; then
+            echo "ERROR: Invalid filename."
+            exit 1
+          fi
+
+          echo "GOFILE_DOWNLOAD_URL=$DOWNLOAD_URL" >> "$GITHUB_ENV"
+          echo "FILE_NAME=$FILE_NAME" >> "$GITHUB_ENV"
+          echo "FILE_ID=$FILE_ID" >> "$GITHUB_ENV"
 
           echo
-          echo "Expected size:"
-          echo "$GOFILE_SIZE bytes"
-
-          echo
-          echo "Direct link:"
-          echo "$GOFILE_LINK"
-
-          echo "GOFILE_FILENAME=$GOFILE_FILENAME" >> "$GITHUB_ENV"
-          echo "GOFILE_LINK=$GOFILE_LINK" >> "$GITHUB_ENV"
-          echo "GOFILE_SIZE=$GOFILE_SIZE" >> "$GITHUB_ENV"
+          echo "File ID   : $FILE_ID"
+          echo "Filename  : $FILE_NAME"
+          echo "Download URL detected successfully."
 
 
       # ============================================================
-      # DOWNLOAD ACTUAL FILE
+      # PREPARE GOFILE COOKIE
+      # ============================================================
+
+      - name: Prepare Gofile authentication cookie
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COOKIE_JAR="$WORK_DIR/gofile.cookies"
+
+          cat > "$COOKIE_JAR" <<EOF
+          # Netscape HTTP Cookie File
+          gofile.io	TRUE	/	FALSE	0	accountToken	$GOFILE_TOKEN
+          EOF
+
+          chmod 600 "$COOKIE_JAR"
+
+          echo "Gofile authentication cookie prepared."
+
+
+      # ============================================================
+      # DOWNLOAD ACTUAL GOFILE FILE
       # ============================================================
 
       - name: Download file from Gofile
@@ -767,514 +705,395 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "============================================================"
+          OUTPUT="$WORK_DIR/$FILE_NAME"
+          COOKIE_JAR="$WORK_DIR/gofile.cookies"
+
+          echo
+          echo "=============================================="
           echo "DOWNLOAD FILE FROM GOFILE"
-          echo "============================================================"
+          echo "=============================================="
 
-          DOWNLOAD="$WORK/$GOFILE_FILENAME"
-
-          COOKIE_JAR="$WORK/gofile.cookies"
-          PAGE_RESPONSE="$WORK/gofile_page.html"
-          DOWNLOAD_HEADERS="$WORK/download_headers.txt"
-
-          rm -f \
-            "$COOKIE_JAR" \
-            "$PAGE_RESPONSE" \
-            "$DOWNLOAD_HEADERS" \
-            "$DOWNLOAD"
-
+          echo "Filename: $FILE_NAME"
           echo
-          echo "Filename:"
-          echo "$GOFILE_FILENAME"
+          echo "Starting download..."
 
-          echo
-          echo "Expected size:"
-          echo "$GOFILE_SIZE bytes"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 7200 \
+            --cookie "$COOKIE_JAR" \
+            --cookie-jar "$COOKIE_JAR" \
+            -A "$GOFILE_USER_AGENT" \
+            -H "Accept: */*" \
+            -H "Authorization: Bearer $GOFILE_TOKEN" \
+            -H "Origin: https://gofile.io" \
+            -H "Referer: $GOFILE_URL" \
+            --output "$OUTPUT" \
+            "$GOFILE_DOWNLOAD_URL"
 
-          # --------------------------------------------------------
-          # Establish Gofile accountToken cookie.
-          # --------------------------------------------------------
-
-          echo
-          echo "Opening Gofile share page..."
-
-          PAGE_HTTP_CODE="$(
-            curl \
-              --silent \
-              --show-error \
-              --location \
-              --compressed \
-              --cookie "accountToken=${GOFILE_TOKEN}" \
-              --cookie-jar "$COOKIE_JAR" \
-              --output "$PAGE_RESPONSE" \
-              --write-out "%{http_code}" \
-              --connect-timeout 30 \
-              --max-time 90 \
-              -A "$GOFILE_USER_AGENT" \
-              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
-              -H "Accept-Language: ${GOFILE_LANGUAGE},en;q=0.9" \
-              -H "Referer: https://gofile.io/" \
-              "$GOFILE_URL" \
-              || true
-          )"
-
-          echo "Share page HTTP status: $PAGE_HTTP_CODE"
-
-          # Explicitly create the accountToken cookie as well.
-          printf '# Netscape HTTP Cookie File\n' > "$COOKIE_JAR"
-
-          printf 'gofile.io\tTRUE\t/\tFALSE\t0\taccountToken\t%s\n' \
-            "$GOFILE_TOKEN" >> "$COOKIE_JAR"
-
-          echo
-          echo "Gofile accountToken cookie prepared."
-
-          # --------------------------------------------------------
-          # Download actual file.
-          # --------------------------------------------------------
-
-          echo
-          echo "Downloading actual file..."
-
-          HTTP_CODE="$(
-            curl \
-              --fail \
-              --silent \
-              --show-error \
-              --location \
-              --compressed \
-              --retry 5 \
-              --retry-delay 5 \
-              --retry-all-errors \
-              --connect-timeout 30 \
-              --max-time 7200 \
-              --cookie "$COOKIE_JAR" \
-              --dump-header "$DOWNLOAD_HEADERS" \
-              -A "$GOFILE_USER_AGENT" \
-              -H "Accept: */*" \
-              -H "Accept-Language: ${GOFILE_LANGUAGE},en;q=0.9" \
-              -H "Authorization: Bearer ${GOFILE_TOKEN}" \
-              -H "Referer: ${GOFILE_URL}" \
-              -H "Origin: https://gofile.io" \
-              --output "$DOWNLOAD" \
-              --write-out "%{http_code}" \
-              "$GOFILE_LINK"
-          )"
-
-          echo
-          echo "Download HTTP status:"
-          echo "$HTTP_CODE"
-
-          if [[ ! -f "$DOWNLOAD" ]]; then
-            echo
+          if [[ ! -f "$OUTPUT" ]]; then
             echo "ERROR: Downloaded file does not exist."
             exit 1
           fi
 
-          ACTUAL_SIZE="$(
-            stat -c '%s' "$DOWNLOAD"
-          )"
+          FILE_SIZE="$(stat -c '%s' "$OUTPUT")"
 
           echo
-          echo "Downloaded size:"
-          echo "$ACTUAL_SIZE bytes"
+          echo "Downloaded size: $FILE_SIZE bytes"
 
-          FILE_TYPE="$(
-            file -b "$DOWNLOAD"
-          )"
-
-          echo
-          echo "Detected file type:"
-          echo "$FILE_TYPE"
-
-          # --------------------------------------------------------
-          # Reject Gofile HTML page.
-          # --------------------------------------------------------
-
-          if echo "$FILE_TYPE" |
-             grep -Eiq 'HTML|XML|JSON|ASCII text|Unicode text'; then
-
-            echo
-            echo "============================================================"
-            echo "ERROR: GOFILE RETURNED HTML/ERROR PAGE"
-            echo "============================================================"
-
-            echo
-            echo "First 1000 bytes:"
-
-            head -c 1000 "$DOWNLOAD" |
-              strings ||
-              true
-
-            echo
-            echo "Response headers:"
-
-            cat "$DOWNLOAD_HEADERS" 2>/dev/null || true
-
-            exit 1
-          fi
-
-          # --------------------------------------------------------
-          # Minimum size.
-          # --------------------------------------------------------
-
-          if (( ACTUAL_SIZE < 10240 )); then
-
+          if [[ "$FILE_SIZE" -lt 10240 ]]; then
             echo
             echo "ERROR: Downloaded file is suspiciously small."
-
+            echo
+            echo "File information:"
+            file "$OUTPUT" || true
+            echo
+            echo "First bytes:"
+            head -c 500 "$OUTPUT" | cat -v || true
             exit 1
           fi
 
-          # --------------------------------------------------------
-          # SHA256.
-          # --------------------------------------------------------
+          FILE_TYPE="$(file -b "$OUTPUT")"
+
+          echo "File type: $FILE_TYPE"
+
+          case "$FILE_TYPE" in
+            *HTML*|*HTML\ document*|*XML*|*JSON*|*ASCII\ text*|*Unicode\ text*)
+              echo
+              echo "ERROR: Gofile returned a webpage/text response instead of the ROM."
+              echo
+              head -c 1000 "$OUTPUT" | cat -v || true
+              exit 1
+              ;;
+          esac
+
+          SHA256="$(sha256sum "$OUTPUT" | awk '{print $1}')"
+
+          echo "FILE_SIZE=$FILE_SIZE" >> "$GITHUB_ENV"
+          echo "FILE_SHA256=$SHA256" >> "$GITHUB_ENV"
 
           echo
-          echo "Calculating SHA256..."
-
-          SHA256="$(
-            sha256sum "$DOWNLOAD" |
-            awk '{print $1}'
-          )"
-
-          echo
-          echo "SHA256:"
-          echo "$SHA256"
-
-          echo
-          echo "Gofile download verified."
-
-          echo "DOWNLOADED_FILE=$DOWNLOAD" >> "$GITHUB_ENV"
-          echo "DOWNLOADED_SIZE=$ACTUAL_SIZE" >> "$GITHUB_ENV"
-          echo "DOWNLOADED_SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "Download completed successfully."
+          echo "SHA256: $SHA256"
 
 
       # ============================================================
-      # SOURCEFORGE CREDENTIAL CHECK
+      # DISPLAY DOWNLOADED FILE
       # ============================================================
 
-      - name: Check SourceForge credentials
+      - name: Verify downloaded ROM
         shell: bash
-        env:
-          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "CHECK SOURCEFORGE CREDENTIALS"
-          echo "============================================================"
+          FILE="$WORK_DIR/$FILE_NAME"
+
+          echo
+          echo "=============================================="
+          echo "DOWNLOADED FILE"
+          echo "=============================================="
+
+          ls -lh "$FILE"
+
+          echo
+          echo "File:"
+          file "$FILE"
+
+          echo
+          echo "Size:"
+          numfmt --to=iec "$FILE_SIZE"
+
+          echo
+          echo "SHA256:"
+          echo "$FILE_SHA256"
+
+
+      # ============================================================
+      # SOURCEFORGE SSH CONFIGURATION
+      # ============================================================
+
+      - name: Configure SourceForge SSH key
+        shell: bash
+        env:
+          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
+          SOURCEFORGE_SSH_KEY: ${{ secrets.SOURCEFORGE_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "=============================================="
+          echo "CONFIGURE SOURCEFORGE SSH"
+          echo "=============================================="
 
           if [[ -z "${SOURCEFORGE_USER:-}" ]]; then
             echo "ERROR: SOURCEFORGE_USER secret is missing."
             exit 1
           fi
 
-          if [[ -z "${SOURCEFORGE_PASSWORD:-}" ]]; then
-            echo "ERROR: SOURCEFORGE_PASSWORD secret is missing."
+          if [[ -z "${SOURCEFORGE_SSH_KEY:-}" ]]; then
+            echo "ERROR: SOURCEFORGE_SSH_KEY secret is missing."
             exit 1
           fi
 
-          echo "SourceForge username:"
-          echo "$SOURCEFORGE_USER"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          printf '%s\n' "$SOURCEFORGE_SSH_KEY" \
+            > "$HOME/.ssh/sourceforge_mistos"
+
+          chmod 600 "$HOME/.ssh/sourceforge_mistos"
 
           echo
-          echo "SourceForge password:"
-          echo "configured"
+          echo "Validating private SSH key..."
+
+          ssh-keygen \
+            -y \
+            -f "$HOME/.ssh/sourceforge_mistos" \
+            > "$HOME/.ssh/sourceforge_mistos.pub"
+
+          chmod 644 "$HOME/.ssh/sourceforge_mistos.pub"
+
+          echo "Private key is valid."
+
+          cat > "$HOME/.ssh/config" <<EOF
+          Host sourceforge-frs
+              HostName ${SOURCEFORGE_HOST}
+              User ${SOURCEFORGE_USER}
+              IdentityFile ${HOME}/.ssh/sourceforge_mistos
+              IdentitiesOnly yes
+              PubkeyAuthentication yes
+              PasswordAuthentication no
+              KbdInteractiveAuthentication no
+              ChallengeResponseAuthentication no
+              StrictHostKeyChecking no
+              ServerAliveInterval 30
+              ServerAliveCountMax 10
+          EOF
+
+          chmod 600 "$HOME/.ssh/config"
+
+          echo
+          echo "SourceForge SSH configuration created."
 
 
       # ============================================================
-      # SOURCEFORGE AUTHENTICATION TEST
+      # TEST SOURCEFORGE AUTHENTICATION
       # ============================================================
 
-      - name: Test SourceForge authentication
+      - name: Test SourceForge SSH authentication
         shell: bash
-        env:
-          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "TEST SOURCEFORGE AUTHENTICATION"
-          echo "============================================================"
-
-          export SSHPASS="$SOURCEFORGE_PASSWORD"
-
           echo
-          echo "Connecting to:"
-          echo "$SOURCEFORGE_HOST"
+          echo "=============================================="
+          echo "TEST SOURCEFORGE SSH AUTHENTICATION"
+          echo "=============================================="
 
-          echo
-          echo "Authentication methods:"
-          echo "  keyboard-interactive"
-          echo "  password"
+          echo "Host: $SOURCEFORGE_HOST"
+          echo "User: ${{ secrets.SOURCEFORGE_USER }}"
 
-          sshpass -e \
-            ssh \
-              -T \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=30 \
-              -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=keyboard-interactive,password \
-              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-              "pwd" \
-              || {
-
-                echo
-                echo "============================================================"
-                echo "SOURCEFORGE AUTHENTICATION FAILED"
-                echo "============================================================"
-                echo
-                echo "SourceForge rejected password authentication."
-                echo
-                echo "If your SourceForge account has 2FA enabled,"
-                echo "a password alone is not sufficient for this"
-                echo "non-interactive GitHub Actions workflow."
-                echo
-                echo "In that case, use an SSH key for SourceForge."
-                echo
-
-                exit 1
-              }
-
-          echo
-          echo "SourceForge authentication successful."
+          if ssh \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            sourceforge-frs \
+            "echo SOURCEFORGE_AUTH_OK"
+          then
+            echo
+            echo "SourceForge SSH authentication successful."
+          else
+            echo
+            echo "=============================================="
+            echo "SOURCEFORGE AUTHENTICATION FAILED"
+            echo "=============================================="
+            echo
+            echo "Check:"
+            echo "1. SOURCEFORGE_USER is correct."
+            echo "2. SOURCEFORGE_SSH_KEY contains the private key."
+            echo "3. The matching public key is added to SourceForge."
+            echo "4. The SourceForge account has developer access to project-mistos."
+            echo "5. The private key has no passphrase."
+            echo
+            exit 1
+          fi
 
 
       # ============================================================
-      # CHECK / CREATE DEVICE DIRECTORY
+      # CREATE SOURCEFORGE DEVICE DIRECTORY
       # ============================================================
 
-      - name: Check or create SourceForge device directory
+      - name: Prepare SourceForge device directory
         shell: bash
-        env:
-          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -euo pipefail
-
-          echo "============================================================"
-          echo "SOURCEFORGE DEVICE DIRECTORY"
-          echo "============================================================"
-
-          export SSHPASS="$SOURCEFORGE_PASSWORD"
 
           DEVICE_DIR="$SOURCEFORGE_BASE/$DEVICE"
 
           echo
-          echo "Device directory:"
+          echo "=============================================="
+          echo "SOURCEFORGE DIRECTORY"
+          echo "=============================================="
+
+          echo "Remote base:"
+          echo "$SOURCEFORGE_BASE"
+
+          echo
+          echo "Device:"
+          echo "$DEVICE"
+
+          echo
+          echo "Remote directory:"
           echo "$DEVICE_DIR"
 
-          # --------------------------------------------------------
-          # Check whether directory exists.
-          # --------------------------------------------------------
+          ssh \
+            -o BatchMode=yes \
+            sourceforge-frs \
+            "mkdir -p '$DEVICE_DIR'"
 
-          if sshpass -e \
-            ssh \
-              -T \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=30 \
-              -o PubkeyAuthentication=no \
-              -o PreferredAuthentications=keyboard-interactive,password \
-              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-              "test -d '$DEVICE_DIR'"; then
-
-            echo
-            echo "Device directory already exists."
-
-          else
-
-            echo
-            echo "Device directory does not exist."
-            echo "Creating:"
-            echo "$DEVICE_DIR"
-
-            sshpass -e \
-              ssh \
-                -T \
-                -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=30 \
-                -o PubkeyAuthentication=no \
-                -o PreferredAuthentications=keyboard-interactive,password \
-                "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-                "mkdir -p '$DEVICE_DIR'"
-
-            echo
-            echo "Device directory created."
-
-          fi
+          echo
+          echo "Device directory is ready."
 
 
       # ============================================================
       # UPLOAD TO SOURCEFORGE
-      #
-      # For large ROM files, rsync is preferred by SourceForge.
-      # It can resume interrupted transfers.
       # ============================================================
 
-      - name: Upload to SourceForge
+      - name: Upload ROM to SourceForge
         shell: bash
-        env:
-          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "UPLOAD TO SOURCEFORGE"
-          echo "============================================================"
-
-          export SSHPASS="$SOURCEFORGE_PASSWORD"
-
-          REMOTE_PATH="$SOURCEFORGE_BASE/$DEVICE/$GOFILE_FILENAME"
+          LOCAL_FILE="$WORK_DIR/$FILE_NAME"
+          REMOTE_DIR="$SOURCEFORGE_BASE/$DEVICE"
+          REMOTE_FILE="$REMOTE_DIR/$FILE_NAME"
 
           echo
+          echo "=============================================="
+          echo "UPLOAD TO SOURCEFORGE"
+          echo "=============================================="
+
           echo "Local file:"
-          echo "$DOWNLOADED_FILE"
+          echo "$LOCAL_FILE"
+
+          echo
+          echo "Remote directory:"
+          echo "$REMOTE_DIR"
 
           echo
           echo "Remote file:"
-          echo "$REMOTE_PATH"
+          echo "$REMOTE_FILE"
 
           echo
-          echo "Uploading..."
+          echo "Starting rsync upload..."
+          echo
 
-          sshpass -e \
-            rsync \
-              -avP \
-              --partial \
-              --progress \
-              -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password" \
-              "$DOWNLOADED_FILE" \
-              "$SOURCEFORGE_USER@$SOURCEFORGE_HOST:$REMOTE_PATH"
+          rsync \
+            -avP \
+            --partial \
+            --inplace \
+            --human-readable \
+            -e "ssh -o BatchMode=yes" \
+            "$LOCAL_FILE" \
+            "sourceforge-frs:$REMOTE_DIR/"
 
           echo
           echo "SourceForge upload completed."
 
 
       # ============================================================
-      # VERIFY UPLOAD
+      # VERIFY SOURCEFORGE UPLOAD
       # ============================================================
 
       - name: Verify SourceForge upload
         shell: bash
-        env:
-          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
-          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -euo pipefail
 
-          echo "============================================================"
+          REMOTE_FILE="$SOURCEFORGE_BASE/$DEVICE/$FILE_NAME"
+
+          echo
+          echo "=============================================="
           echo "VERIFY SOURCEFORGE UPLOAD"
-          echo "============================================================"
+          echo "=============================================="
 
-          export SSHPASS="$SOURCEFORGE_PASSWORD"
-
-          REMOTE_PATH="$SOURCEFORGE_BASE/$DEVICE/$GOFILE_FILENAME"
+          echo "Remote file:"
+          echo "$REMOTE_FILE"
 
           REMOTE_SIZE="$(
-            sshpass -e \
-              ssh \
-                -T \
-                -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=30 \
-                -o PubkeyAuthentication=no \
-                -o PreferredAuthentications=keyboard-interactive,password \
-                "$SOURCEFORGE_USER@$SOURCEFORGE_HOST" \
-                "stat -c '%s' '$REMOTE_PATH'"
+            ssh \
+              -o BatchMode=yes \
+              sourceforge-frs \
+              "stat -c '%s' '$REMOTE_FILE'"
           )"
 
           echo
-          echo "Local size:"
-          echo "$DOWNLOADED_SIZE bytes"
+          echo "Local size : $FILE_SIZE bytes"
+          echo "Remote size: $REMOTE_SIZE bytes"
+
+          if [[ "$REMOTE_SIZE" != "$FILE_SIZE" ]]; then
+            echo
+            echo "ERROR: Remote file size does not match local file."
+            exit 1
+          fi
+
+          REMOTE_SHA256="$(
+            ssh \
+              -o BatchMode=yes \
+              sourceforge-frs \
+              "sha256sum '$REMOTE_FILE' | awk '{print \$1}'"
+          )"
 
           echo
-          echo "Remote size:"
-          echo "$REMOTE_SIZE bytes"
+          echo "Local SHA256 : $FILE_SHA256"
+          echo "Remote SHA256: $REMOTE_SHA256"
 
-          if [[ "$REMOTE_SIZE" != "$DOWNLOADED_SIZE" ]]; then
-
+          if [[ "$REMOTE_SHA256" != "$FILE_SHA256" ]]; then
             echo
-            echo "ERROR: SourceForge file size does not match."
-
+            echo "ERROR: SHA256 checksum mismatch."
             exit 1
           fi
 
           echo
-          echo "UPLOAD VERIFIED SUCCESSFULLY."
+          echo "=============================================="
+          echo "UPLOAD VERIFIED SUCCESSFULLY"
+          echo "=============================================="
 
 
       # ============================================================
-      # FINAL SUMMARY
+      # PRINT FINAL SOURCEFORGE URL
       # ============================================================
 
-      - name: Transfer summary
-        if: success()
+      - name: Show SourceForge download URL
         shell: bash
         run: |
+          set -euo pipefail
+
+          SOURCEFORGE_URL="https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$FILE_NAME"
+
           echo
           echo "============================================================"
-          echo "             MISTOS TRANSFER COMPLETE"
+          echo "                    MISTOS UPLOAD COMPLETE"
           echo "============================================================"
-
           echo
           echo "Device:"
           echo "  $DEVICE"
-
-          echo
-          echo "Filename:"
-          echo "  $GOFILE_FILENAME"
-
-          echo
-          echo "Size:"
-          echo "  $DOWNLOADED_SIZE bytes"
-
-          echo
-          echo "SHA256:"
-          echo "  $DOWNLOADED_SHA256"
-
-          echo
-          echo "SourceForge directory:"
-          echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/"
-
           echo
           echo "File:"
-          echo "  https://sourceforge.net/projects/project-mistos/files/Android17/$DEVICE/$GOFILE_FILENAME"
-
+          echo "  $FILE_NAME"
+          echo
+          echo "Size:"
+          echo "  $(numfmt --to=iec "$FILE_SIZE")"
+          echo
+          echo "SHA256:"
+          echo "  $FILE_SHA256"
+          echo
+          echo "SourceForge:"
+          echo "  $SOURCEFORGE_URL"
           echo
           echo "============================================================"
-
-
-      # ============================================================
-      # ALWAYS CLEANUP
-      # ============================================================
-
-      - name: Cleanup
-        if: always()
-        shell: bash
-        run: |
-          set +e
-
-          echo "============================================================"
-          echo "CLEANUP"
-          echo "============================================================"
-
-          if [[ -n "${WORK:-}" ]]; then
-            echo "Removing:"
-            echo "$WORK"
-
-            rm -rf "$WORK"
-          fi
-
-          unset SSHPASS
-          unset GOFILE_TOKEN
-          unset GOFILE_WT_SECRET
-
-          echo
-          echo "Cleanup completed."
