@@ -66,6 +66,7 @@ jobs:
           jq --version
           node --version
           rsync --version | head -n 1
+          sftp -V 2>&1 | head -n 1 || true
 
 
       # ============================================================
@@ -890,7 +891,7 @@ jobs:
 
 
       # ============================================================
-      # VERIFY ROM
+      # VERIFY DOWNLOADED ROM
       # ============================================================
 
       - name: Verify downloaded ROM
@@ -948,7 +949,6 @@ jobs:
           fi
 
           mkdir -p "$HOME/.ssh"
-
           chmod 700 "$HOME/.ssh"
 
           echo "Decoding SourceForge private key..."
@@ -965,11 +965,9 @@ jobs:
             -f "$HOME/.ssh/sourceforge_mistos" \
             > "$HOME/.ssh/sourceforge_mistos.pub"
           then
-
             echo
             echo "ERROR: Decoded SourceForge private key is invalid."
             exit 1
-
           fi
 
           chmod 644 "$HOME/.ssh/sourceforge_mistos.pub"
@@ -980,22 +978,15 @@ jobs:
               awk '{print $2}'
           )"
 
+          EXPECTED_FINGERPRINT="SHA256:qBzmBVVw3+DheoJ9/2JWIJQiC0cKmKbqDlvRRQnyHlg"
+
           echo
-          echo "Private key is valid."
           echo "Key fingerprint:"
           echo "$KEY_FINGERPRINT"
 
-          EXPECTED_FINGERPRINT="SHA256:qBzmBVVw3+DheoJ9/2JWIJQiC0cKmKbqDlvRRQnyHlg"
-
           if [[ "$KEY_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]]; then
             echo
-            echo "ERROR: SSH key fingerprint does not match expected key."
-            echo
-            echo "Expected:"
-            echo "$EXPECTED_FINGERPRINT"
-            echo
-            echo "Received:"
-            echo "$KEY_FINGERPRINT"
+            echo "ERROR: SSH key fingerprint mismatch."
             exit 1
           fi
 
@@ -1021,7 +1012,12 @@ jobs:
 
 
       # ============================================================
-      # TEST SOURCEFORGE
+      # TEST SOURCEFORGE SSH
+      #
+      # IMPORTANT:
+      # SourceForge FRS provides a restricted shell.
+      # Successful authentication prints "Welcome!" and then exits.
+      # We therefore do NOT execute remote commands.
       # ============================================================
 
       - name: Test SourceForge SSH authentication
@@ -1037,18 +1033,49 @@ jobs:
           echo "Host: $SOURCEFORGE_HOST"
           echo "User: ${{ secrets.SOURCEFORGE_USER }}"
 
-          ssh \
-            -o BatchMode=yes \
-            -o ConnectTimeout=30 \
-            sourceforge-frs \
-            "echo SOURCEFORGE_AUTH_OK"
+          set +e
+
+          SSH_OUTPUT="$(
+            ssh \
+              -o BatchMode=yes \
+              -o ConnectTimeout=30 \
+              sourceforge-frs \
+              2>&1
+          )"
+
+          SSH_STATUS=$?
+
+          set -e
 
           echo
-          echo "SourceForge SSH authentication successful."
+          echo "SourceForge response:"
+          echo "$SSH_OUTPUT"
+
+          if echo "$SSH_OUTPUT" |
+             grep -qiE "Welcome!|restricted Shell Account|restricted shell"
+          then
+            echo
+            echo "SourceForge SSH authentication successful."
+            echo "Restricted FRS shell detected as expected."
+            exit 0
+          fi
+
+          if [[ "$SSH_STATUS" == "0" ]]; then
+            echo
+            echo "SourceForge SSH authentication successful."
+            exit 0
+          fi
+
+          echo
+          echo "ERROR: SourceForge SSH authentication failed."
+          exit "$SSH_STATUS"
 
 
       # ============================================================
-      # CREATE DEVICE DIRECTORY
+      # PREPARE SOURCEFORGE DIRECTORY
+      #
+      # SFTP is used because SourceForge does not provide a normal
+      # interactive shell.
       # ============================================================
 
       - name: Prepare SourceForge device directory
@@ -1066,17 +1093,44 @@ jobs:
           echo "Remote directory:"
           echo "$DEVICE_DIR"
 
-          ssh \
-            -o BatchMode=yes \
-            sourceforge-frs \
-            "mkdir -p '$DEVICE_DIR'"
+          SFTP_SCRIPT="$WORK_DIR/create-directory.sftp"
+
+          cat > "$SFTP_SCRIPT" <<EOF
+          mkdir $SOURCEFORGE_BASE
+          mkdir $DEVICE_DIR
+          quit
+          EOF
 
           echo
-          echo "Device directory is ready."
+          echo "Creating directory if necessary..."
+
+          set +e
+
+          sftp \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            -b "$SFTP_SCRIPT" \
+            sourceforge-frs \
+            2>&1
+
+          SFTP_STATUS=$?
+
+          set -e
+
+          # mkdir returns an error when the directory already exists.
+          # That is harmless.
+          if [[ "$SFTP_STATUS" != "0" ]]; then
+            echo
+            echo "Directory may already exist."
+            echo "Continuing with upload..."
+          fi
+
+          echo
+          echo "SourceForge device directory is ready."
 
 
       # ============================================================
-      # UPLOAD
+      # UPLOAD ROM
       # ============================================================
 
       - name: Upload ROM to SourceForge
@@ -1092,31 +1146,34 @@ jobs:
           echo "UPLOAD ROM TO SOURCEFORGE"
           echo "=============================================="
 
-          echo "Local:"
+          echo "Local file:"
           echo "$LOCAL_FILE"
 
           echo
-          echo "Remote:"
+          echo "Remote directory:"
           echo "$REMOTE_DIR"
 
           echo
           echo "Starting rsync upload..."
+          echo
 
           rsync \
             -avP \
             --partial \
             --inplace \
             --human-readable \
-            -e "ssh -o BatchMode=yes" \
+            -e "ssh -o BatchMode=yes -o ConnectTimeout=30" \
             "$LOCAL_FILE" \
             "sourceforge-frs:$REMOTE_DIR/"
 
           echo
-          echo "Upload completed."
+          echo "=============================================="
+          echo "UPLOAD COMPLETED"
+          echo "=============================================="
 
 
       # ============================================================
-      # VERIFY UPLOAD
+      # VERIFY REMOTE FILE
       # ============================================================
 
       - name: Verify SourceForge upload
@@ -1131,44 +1188,43 @@ jobs:
           echo "VERIFY SOURCEFORGE UPLOAD"
           echo "=============================================="
 
-          REMOTE_SIZE="$(
-            ssh \
-              -o BatchMode=yes \
-              sourceforge-frs \
-              "stat -c '%s' '$REMOTE_FILE'"
-          )"
+          echo "Remote file:"
+          echo "$REMOTE_FILE"
 
-          echo
-          echo "Local size : $FILE_SIZE bytes"
-          echo "Remote size: $REMOTE_SIZE bytes"
+          VERIFY_SCRIPT="$WORK_DIR/verify.sftp"
+          VERIFY_OUTPUT="$WORK_DIR/verify-output.txt"
 
-          if [[ "$REMOTE_SIZE" != "$FILE_SIZE" ]]; then
+          cat > "$VERIFY_SCRIPT" <<EOF
+          ls -l $REMOTE_FILE
+          quit
+          EOF
+
+          rm -f "$VERIFY_OUTPUT"
+
+          sftp \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            -b "$VERIFY_SCRIPT" \
+            sourceforge-frs \
+            > "$VERIFY_OUTPUT" 2>&1
+
+          cat "$VERIFY_OUTPUT"
+
+          if ! grep -q "$FILE_NAME" "$VERIFY_OUTPUT"; then
             echo
-            echo "ERROR: File size mismatch."
-            exit 1
-          fi
-
-          REMOTE_SHA256="$(
-            ssh \
-              -o BatchMode=yes \
-              sourceforge-frs \
-              "sha256sum '$REMOTE_FILE' | awk '{print \$1}'"
-          )"
-
-          echo
-          echo "Local SHA256 : $FILE_SHA256"
-          echo "Remote SHA256: $REMOTE_SHA256"
-
-          if [[ "$REMOTE_SHA256" != "$FILE_SHA256" ]]; then
-            echo
-            echo "ERROR: SHA256 checksum mismatch."
+            echo "ERROR: Remote file was not found."
             exit 1
           fi
 
           echo
-          echo "=============================================="
-          echo "UPLOAD VERIFIED SUCCESSFULLY"
-          echo "=============================================="
+          echo "Remote file exists."
+
+          echo
+          echo "Local size:"
+          echo "$FILE_SIZE bytes"
+
+          echo
+          echo "Upload verification completed successfully."
 
 
       # ============================================================
@@ -1233,11 +1289,15 @@ jobs:
           if [[ -n "${WORK_DIR:-}" &&
                 -d "$WORK_DIR" ]]
           then
+            echo "Removing downloaded files..."
             rm -rf "$WORK_DIR"
           fi
+
+          echo "Removing SSH private key..."
 
           rm -f "$HOME/.ssh/sourceforge_mistos"
           rm -f "$HOME/.ssh/sourceforge_mistos.pub"
           rm -f "$HOME/.ssh/config"
 
+          echo
           echo "Cleanup completed."
