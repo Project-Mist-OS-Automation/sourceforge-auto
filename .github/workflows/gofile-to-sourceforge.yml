@@ -1,4 +1,4 @@
-name: Gofile → SourceForge
+name: Gofile to MistOS SourceForge
 
 on:
   workflow_dispatch:
@@ -9,13 +9,13 @@ on:
         type: string
 
       device:
-        description: "Device name (example: raphael, bluejay, lisa, sweet)"
+        description: "Device name (raphael, bluejay, lisa, sweet, etc.)"
         required: true
         type: string
 
 jobs:
   transfer:
-    name: Download from Gofile and upload to SourceForge
+    name: Download and Upload
     runs-on: ubuntu-latest
 
     env:
@@ -23,45 +23,40 @@ jobs:
       SOURCEFORGE_BASE_DIR: Android17
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Prepare environment
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 1. Prepare environment
+      # ==========================================================
+
       - name: Prepare environment
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Preparing environment"
+          echo "              MistOS Gofile → SourceForge"
           echo "============================================================"
+
+          echo "Installing required packages..."
 
           sudo apt-get update
           sudo apt-get install -y \
-            curl \
             wget \
+            curl \
             jq \
-            rsync \
-            ca-certificates \
-            python3
+            openssh-client \
+            sshpass \
+            ca-certificates
 
-          mkdir -p "$RUNNER_TEMP/gofile-transfer"
-          mkdir -p "$RUNNER_TEMP/gofile-transfer/download"
-
-          echo "Workspace:"
-          df -h
+          mkdir -p "$RUNNER_TEMP/mistos-transfer/download"
 
           echo
           echo "Environment ready."
 
-      # ---------------------------------------------------------
-      # 3. Validate user input
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 2. Validate inputs
+      # ==========================================================
+
       - name: Validate inputs
         shell: bash
         env:
@@ -71,7 +66,7 @@ jobs:
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Validating inputs"
+          echo "                    INPUT VALIDATION"
           echo "============================================================"
 
           if [[ -z "$GOFILE_URL" ]]; then
@@ -89,32 +84,68 @@ jobs:
             exit 1
           fi
 
-          # Only allow safe directory names.
           if [[ ! "$DEVICE" =~ ^[a-zA-Z0-9._-]+$ ]]; then
             echo "::error::Invalid device name: $DEVICE"
-            echo "Use names such as: raphael, bluejay, lisa, sweet"
+            echo "Allowed examples:"
+            echo "  raphael"
+            echo "  bluejay"
+            echo "  lisa"
+            echo "  sweet"
             exit 1
           fi
 
           echo "Gofile URL : $GOFILE_URL"
           echo "Device     : $DEVICE"
+
           echo
           echo "SourceForge destination:"
-          echo "https://sourceforge.net/projects/${SOURCEFORGE_PROJECT}/files/${SOURCEFORGE_BASE_DIR}/${DEVICE}/"
+          echo "Android17/$DEVICE/"
 
-      # ---------------------------------------------------------
-      # 4. Download from Gofile
-      # ---------------------------------------------------------
-      - name: Download file from Gofile
+      # ==========================================================
+      # 3. Check credentials
+      # ==========================================================
+
+      - name: Check SourceForge credentials
         shell: bash
         env:
-          GOFILE_URL: ${{ inputs.gofile_url }}
-          DOWNLOAD_DIR: ${{ runner.temp }}/gofile-transfer/download
+          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
+          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Downloading from Gofile"
+          echo "              SOURCEFORGE CREDENTIAL CHECK"
+          echo "============================================================"
+
+          if [[ -z "${SOURCEFORGE_USER:-}" ]]; then
+            echo "::error::SOURCEFORGE_USER secret is missing."
+            exit 1
+          fi
+
+          if [[ -z "${SOURCEFORGE_PASSWORD:-}" ]]; then
+            echo "::error::SOURCEFORGE_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          echo "SourceForge user: $SOURCEFORGE_USER"
+          echo "SourceForge password: ********"
+          echo
+          echo "Credentials found."
+
+      # ==========================================================
+      # 4. Download from Gofile
+      # ==========================================================
+
+      - name: Download from Gofile
+        shell: bash
+        env:
+          GOFILE_URL: ${{ inputs.gofile_url }}
+          DOWNLOAD_DIR: ${{ runner.temp }}/mistos-transfer/download
+        run: |
+          set -Eeuo pipefail
+
+          echo "============================================================"
+          echo "                    GOFILE DOWNLOAD"
           echo "============================================================"
 
           rm -rf "$DOWNLOAD_DIR"
@@ -122,46 +153,40 @@ jobs:
 
           cd "$DOWNLOAD_DIR"
 
-          echo "URL:"
+          echo "Download URL:"
           echo "$GOFILE_URL"
+
+          echo
+          echo "Starting download..."
           echo
 
-          echo "Requesting Gofile URL..."
-          echo
-
-          # First attempt:
-          # Gofile direct download links normally redirect to the
-          # actual file server.
           wget \
             --content-disposition \
             --trust-server-names \
             --show-progress \
             --progress=dot:giga \
             --timeout=60 \
-            --tries=5 \
-            --waitretry=5 \
+            --tries=10 \
+            --waitretry=10 \
             --retry-connrefused \
             "$GOFILE_URL"
 
           echo
-          echo "Download command completed."
+          echo "Gofile download completed."
 
-          echo
-          echo "Downloaded files:"
-          find "$DOWNLOAD_DIR" -maxdepth 1 -type f -printf '%f\t%s bytes\n'
+      # ==========================================================
+      # 5. Validate downloaded file
+      # ==========================================================
 
-      # ---------------------------------------------------------
-      # 5. Find and validate downloaded file
-      # ---------------------------------------------------------
       - name: Validate downloaded file
         shell: bash
         env:
-          DOWNLOAD_DIR: ${{ runner.temp }}/gofile-transfer/download
+          DOWNLOAD_DIR: ${{ runner.temp }}/mistos-transfer/download
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Validating downloaded file"
+          echo "                  DOWNLOAD VALIDATION"
           echo "============================================================"
 
           mapfile -t FILES < <(
@@ -177,8 +202,10 @@ jobs:
           fi
 
           if [[ "${#FILES[@]}" -gt 1 ]]; then
-            echo "::error::More than one file was downloaded:"
+            echo "::error::More than one file was downloaded."
+
             printf '%s\n' "${FILES[@]}"
+
             exit 1
           fi
 
@@ -189,18 +216,18 @@ jobs:
             exit 1
           fi
 
-          SIZE=$(stat -c '%s' "$FILE")
-          HUMAN_SIZE=$(du -h "$FILE" | cut -f1)
-          FILENAME=$(basename "$FILE")
-          SHA256=$(sha256sum "$FILE" | awk '{print $1}')
+          FILENAME="$(basename "$FILE")"
+          SIZE="$(stat -c '%s' "$FILE")"
+          HUMAN_SIZE="$(du -h "$FILE" | cut -f1)"
+          SHA256="$(sha256sum "$FILE" | awk '{print $1}')"
 
           echo "Filename : $FILENAME"
           echo "Size     : $SIZE bytes"
           echo "Size     : $HUMAN_SIZE"
           echo "SHA256   : $SHA256"
-          echo
 
-          echo "File validation successful."
+          echo
+          echo "Downloaded file is valid."
 
           {
             echo "DOWNLOADED_FILE=$FILE"
@@ -209,172 +236,146 @@ jobs:
             echo "DOWNLOADED_SHA256=$SHA256"
           } >> "$GITHUB_ENV"
 
-      # ---------------------------------------------------------
-      # 6. Install SourceForge upload tools
-      # ---------------------------------------------------------
-      - name: Prepare SourceForge uploader
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+      # ==========================================================
+      # 6. Upload to SourceForge
+      # ==========================================================
 
-          echo "============================================================"
-          echo "Preparing SourceForge uploader"
-          echo "============================================================"
-
-          # SourceForge supports uploads over SFTP.
-          # OpenSSH is used instead of depending on a third-party
-          # uploader.
-
-          sudo apt-get install -y openssh-client
-
-          echo
-          echo "SSH/SFTP version:"
-          sftp -V 2>&1 | head -n 1 || true
-
-          echo
-          echo "SourceForge uploader ready."
-
-      # ---------------------------------------------------------
-      # 7. Upload to SourceForge
-      # ---------------------------------------------------------
       - name: Upload to SourceForge
         shell: bash
         env:
-          SOURCEFORGE_TOKEN: ${{ secrets.SOURCEFORGE_TOKEN }}
+          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
+          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
           DEVICE: ${{ inputs.device }}
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Uploading to SourceForge"
+          echo "                  SOURCEFORGE UPLOAD"
           echo "============================================================"
 
-          if [[ -z "${SOURCEFORGE_TOKEN:-}" ]]; then
-            echo "::error::SOURCEFORGE_TOKEN GitHub secret is not configured."
-            exit 1
-          fi
-
           SOURCEFORGE_HOST="frs.sourceforge.net"
-          SOURCEFORGE_USER="yusufnoor786"
 
           REMOTE_DIR="/home/frs/project-mistos/Android17/${DEVICE}"
 
-          echo "Project       : project-mistos"
-          echo "Device        : ${DEVICE}"
-          echo "Remote host   : ${SOURCEFORGE_HOST}"
-          echo "Remote folder : ${REMOTE_DIR}"
-          echo "Local file    : ${DOWNLOADED_FILENAME}"
-          echo "File size     : ${DOWNLOADED_SIZE} bytes"
-          echo "SHA256        : ${DOWNLOADED_SHA256}"
+          echo "Host      : $SOURCEFORGE_HOST"
+          echo "User      : $SOURCEFORGE_USER"
+          echo "Project   : $SOURCEFORGE_PROJECT"
+          echo "Directory : $REMOTE_DIR"
+          echo "File      : $DOWNLOADED_FILENAME"
+          echo "Size      : $DOWNLOADED_SIZE bytes"
+          echo "SHA256    : $DOWNLOADED_SHA256"
+
           echo
+          echo "Preparing SFTP commands..."
 
-          echo "Connecting to SourceForge..."
-
-          cat > "$RUNNER_TEMP/upload_commands.txt" <<EOF
-          -mkdir /home/frs/project-mistos/Android17
-          -mkdir ${REMOTE_DIR}
+          cat > "$RUNNER_TEMP/sourceforge_upload.txt" <<EOF
+          mkdir /home/frs/project-mistos/Android17
+          mkdir ${REMOTE_DIR}
           put "${DOWNLOADED_FILE}" "${REMOTE_DIR}/${DOWNLOADED_FILENAME}"
           ls -l "${REMOTE_DIR}/${DOWNLOADED_FILENAME}"
           bye
           EOF
 
-          chmod 600 "$RUNNER_TEMP/upload_commands.txt"
+          chmod 600 "$RUNNER_TEMP/sourceforge_upload.txt"
 
           echo
-          echo "Starting upload..."
+          echo "Uploading..."
           echo
 
-          SFTP_PASSWORD="$SOURCEFORGE_TOKEN" \
+          SSHPASS="$SOURCEFORGE_PASSWORD" \
           sshpass -e sftp \
             -oBatchMode=no \
             -oStrictHostKeyChecking=no \
             -oConnectTimeout=60 \
-            -b "$RUNNER_TEMP/upload_commands.txt" \
+            -oServerAliveInterval=30 \
+            -oServerAliveCountMax=10 \
+            -b "$RUNNER_TEMP/sourceforge_upload.txt" \
             "${SOURCEFORGE_USER}@${SOURCEFORGE_HOST}"
 
           echo
-          echo "============================================================"
-          echo "Upload completed"
-          echo "============================================================"
+          echo "SourceForge upload completed successfully."
 
-      # ---------------------------------------------------------
-      # 8. Verify remote file
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 7. Verify upload
+      # ==========================================================
+
       - name: Verify SourceForge upload
         shell: bash
         env:
-          SOURCEFORGE_TOKEN: ${{ secrets.SOURCEFORGE_TOKEN }}
+          SOURCEFORGE_USER: ${{ secrets.SOURCEFORGE_USER }}
+          SOURCEFORGE_PASSWORD: ${{ secrets.SOURCEFORGE_PASSWORD }}
           DEVICE: ${{ inputs.device }}
         run: |
           set -Eeuo pipefail
 
           echo "============================================================"
-          echo "Verifying SourceForge upload"
+          echo "                VERIFY SOURCEFORGE FILE"
           echo "============================================================"
 
           SOURCEFORGE_HOST="frs.sourceforge.net"
-          SOURCEFORGE_USER="yusufnoor786"
+
           REMOTE_DIR="/home/frs/project-mistos/Android17/${DEVICE}"
 
-          cat > "$RUNNER_TEMP/verify_commands.txt" <<EOF
+          cat > "$RUNNER_TEMP/sourceforge_verify.txt" <<EOF
           ls -l "${REMOTE_DIR}/${DOWNLOADED_FILENAME}"
           bye
           EOF
 
-          chmod 600 "$RUNNER_TEMP/verify_commands.txt"
+          chmod 600 "$RUNNER_TEMP/sourceforge_verify.txt"
 
-          SFTP_PASSWORD="$SOURCEFORGE_TOKEN" \
+          SSHPASS="$SOURCEFORGE_PASSWORD" \
           sshpass -e sftp \
             -oBatchMode=no \
             -oStrictHostKeyChecking=no \
             -oConnectTimeout=60 \
-            -b "$RUNNER_TEMP/verify_commands.txt" \
+            -oServerAliveInterval=30 \
+            -oServerAliveCountMax=10 \
+            -b "$RUNNER_TEMP/sourceforge_verify.txt" \
             "${SOURCEFORGE_USER}@${SOURCEFORGE_HOST}"
 
           echo
-          echo "Remote file exists."
-          echo
-          echo "SourceForge URL:"
-          echo "https://sourceforge.net/projects/project-mistos/files/Android17/${DEVICE}/${DOWNLOADED_FILENAME}"
+          echo "============================================================"
+          echo "                 UPLOAD VERIFIED"
+          echo "============================================================"
 
-      # ---------------------------------------------------------
-      # 9. Cleanup downloaded file
-      # ---------------------------------------------------------
+      # ==========================================================
+      # 8. Cleanup - ALWAYS RUN
+      # ==========================================================
+
       - name: Cleanup downloaded file
         if: always()
         shell: bash
         env:
-          DOWNLOAD_DIR: ${{ runner.temp }}/gofile-transfer/download
+          DOWNLOAD_DIR: ${{ runner.temp }}/mistos-transfer/download
         run: |
           set +e
 
           echo "============================================================"
-          echo "Cleaning up"
+          echo "                       CLEANUP"
           echo "============================================================"
 
           if [[ -d "$DOWNLOAD_DIR" ]]; then
-            echo "Removing downloaded files..."
+
+            echo "Removing downloaded file..."
 
             rm -rf "$DOWNLOAD_DIR"
 
-            echo "Download directory removed."
+            echo "Downloaded file removed."
+
           else
-            echo "Download directory already removed."
+
+            echo "Download directory does not exist."
+
           fi
 
           echo
-          echo "Checking cleanup..."
+          echo "Cleanup finished."
 
-          if [[ ! -d "$DOWNLOAD_DIR" ]]; then
-            echo "Cleanup successful."
-          else
-            echo "::warning::Download directory still exists."
-          fi
+      # ==========================================================
+      # 9. Final summary
+      # ==========================================================
 
-      # ---------------------------------------------------------
-      # 10. Final status
-      # ---------------------------------------------------------
-      - name: Transfer summary
+      - name: Final summary
         if: always()
         shell: bash
         env:
@@ -382,26 +383,32 @@ jobs:
         run: |
           echo
           echo "============================================================"
-          echo "TRANSFER SUMMARY"
+          echo "                    TRANSFER SUMMARY"
           echo "============================================================"
 
-          echo "Device: ${DEVICE}"
+          echo "Device : $DEVICE"
 
           if [[ -n "${DOWNLOADED_FILENAME:-}" ]]; then
-            echo "File: ${DOWNLOADED_FILENAME}"
+            echo "File   : $DOWNLOADED_FILENAME"
           fi
 
           if [[ -n "${DOWNLOADED_SIZE:-}" ]]; then
-            echo "Size: ${DOWNLOADED_SIZE} bytes"
+            echo "Size   : $DOWNLOADED_SIZE bytes"
           fi
 
           if [[ -n "${DOWNLOADED_SHA256:-}" ]]; then
-            echo "SHA256: ${DOWNLOADED_SHA256}"
+            echo "SHA256 : $DOWNLOADED_SHA256"
           fi
 
           echo
           echo "SourceForge directory:"
           echo "https://sourceforge.net/projects/project-mistos/files/Android17/${DEVICE}/"
+
+          if [[ -n "${DOWNLOADED_FILENAME:-}" ]]; then
+            echo
+            echo "File:"
+            echo "https://sourceforge.net/projects/project-mistos/files/Android17/${DEVICE}/${DOWNLOADED_FILENAME}"
+          fi
 
           echo
           echo "============================================================"
